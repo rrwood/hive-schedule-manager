@@ -159,20 +159,41 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     def get_hive_auth_token() -> str | None:
         """Extract auth token from existing Hive integration."""
         if "hive" not in hass.data:
-            _LOGGER.error(
-                "Hive integration not found. "
-                "Please ensure the official Hive integration is set up first."
-            )
+            _LOGGER.debug("Hive integration not yet in hass.data")
             return None
-            
+        
         try:
-            # Try to access the Hive session
-            hive_session = hass.data["hive"].get("session")
-            if hive_session and hasattr(hive_session, "auth"):
-                token = getattr(hive_session.auth, "token", None)
+            # Try different methods to access the Hive session token
+            hive_data = hass.data["hive"]
+            
+            # Method 1: Direct session access
+            if isinstance(hive_data, dict) and "session" in hive_data:
+                hive_session = hive_data["session"]
+                if hasattr(hive_session, "auth"):
+                    token = getattr(hive_session.auth, "token", None)
+                    if token:
+                        _LOGGER.debug("Retrieved token via Method 1 (session.auth.token)")
+                        return token
+            
+            # Method 2: Check if hive_data itself has auth
+            if hasattr(hive_data, "session"):
+                hive_session = hive_data.session
+                if hasattr(hive_session, "auth"):
+                    token = getattr(hive_session.auth, "token", None)
+                    if token:
+                        _LOGGER.debug("Retrieved token via Method 2 (hive_data.session.auth.token)")
+                        return token
+            
+            # Method 3: Direct token access
+            if hasattr(hive_data, "auth"):
+                token = getattr(hive_data.auth, "token", None)
                 if token:
-                    _LOGGER.debug("Successfully retrieved Hive auth token")
+                    _LOGGER.debug("Retrieved token via Method 3 (hive_data.auth.token)")
                     return token
+                    
+            _LOGGER.warning("Hive integration loaded but could not find auth token")
+            _LOGGER.debug("Available hive_data keys: %s", list(hive_data.keys()) if isinstance(hive_data, dict) else "not a dict")
+            
         except (KeyError, AttributeError) as err:
             _LOGGER.error("Could not access Hive auth token: %s", err)
         
@@ -190,15 +211,17 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         else:
             _LOGGER.warning("Could not refresh Hive auth token")
     
-    # Initial auth
+    # Initial auth with retry
     await refresh_auth()
     
     if not api.has_auth:
-        _LOGGER.error(
-            "Failed to initialize: Could not get Hive authentication token. "
-            "Ensure the Hive integration is configured and loaded."
+        _LOGGER.warning(
+            "Could not get Hive authentication token on first attempt. "
+            "Will retry every %s. Ensure the Hive integration is configured.",
+            scan_interval
         )
-        return False
+        # Don't fail setup - just log warning and continue
+        # The periodic refresh will get the token when Hive integration is ready
     
     # Set up periodic refresh
     scan_interval = config.get(DOMAIN, {}).get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
