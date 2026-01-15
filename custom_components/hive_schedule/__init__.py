@@ -203,6 +203,10 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     api = HiveScheduleAPI()
     hass.data[DOMAIN] = {"api": api}
     
+    # Run diagnostics to find where the token is stored
+    from .diagnostics import inspect_hive_data
+    inspect_hive_data(hass)
+    
     async def refresh_auth(now=None) -> None:
         """Refresh authentication token from Hive integration."""
         token = await hass.async_add_executor_job(get_hive_auth_token)
