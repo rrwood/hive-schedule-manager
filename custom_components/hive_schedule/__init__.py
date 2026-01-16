@@ -14,6 +14,9 @@ import traceback
 
 import voluptuous as vol
 import requests
+from botocore.auth import SigV4Auth
+from botocore.awsrequest import AWSRequest
+from botocore.session import Session as BotoSession
 from pycognito import Cognito
 from pycognito.exceptions import SMSMFAChallengeException
 from botocore.exceptions import ClientError
@@ -252,6 +255,8 @@ class HiveScheduleAPI:
     """API client for Hive Schedule operations."""
     
     BASE_URL = "https://beekeeper-uk.hivehome.com/1.0"
+    AWS_REGION = "eu-west-1"
+    AWS_SERVICE = "execute-api"
     
     def __init__(self, auth: HiveAuth) -> None:
         """Initialize the API client."""
@@ -264,214 +269,51 @@ class HiveScheduleAPI:
             "Referer": "https://my.hivehome.com/"
         })
     
-    @staticmethod
-    def time_to_minutes(time_str: str) -> int:
-        """Convert time string to minutes from midnight."""
-        h, m = map(int, time_str.split(":"))
-        return h * 60 + m
-    
-    def build_schedule_entry(self, time_str: str, temp: float) -> dict[str, Any]:
-        """Build a single schedule entry."""
-        return {
-            "value": {"target": float(temp)},
-            "start": self.time_to_minutes(time_str)
-        }
-    
-    def get_schedule(self, node_id: str) -> dict[str, Any] | None:
-        """Fetch current schedule from Hive - try multiple endpoints and methods."""
-        # Try both ID token and access token
-        id_token = self.auth.get_id_token()
-        access_token = self.auth.get_access_token()
-        
-        if not id_token:
-            _LOGGER.error("Cannot get schedule: No auth token available")
-            return None
-        
-        tokens_to_try = [
-            ("ID Token", id_token),
-            ("Access Token", access_token) if access_token else None
-        ]
-        tokens_to_try = [t for t in tokens_to_try if t is not None]
-        
-        endpoints_to_try = [
-            f"{self.BASE_URL}/nodes/heating/{node_id}",
-            f"{self.BASE_URL}/heating/{node_id}",
-            f"{self.BASE_URL}/schedules/{node_id}",
-        ]
-        
-        for token_name, token in tokens_to_try:
-            _LOGGER.info("Trying with %s", token_name)
-            self.session.headers["Authorization"] = f"Bearer {token}"
-            
-            for url in endpoints_to_try:
-                try:
-                    _LOGGER.debug("Attempting to fetch schedule from: %s with %s", url, token_name)
-                    response = self.session.get(url, timeout=30)
-                    
-                    _LOGGER.info("Response status from %s: %d", url, response.status_code)
-                    
-                    if response.status_code == 403:
-                        _LOGGER.warning("Access forbidden (403)")
-                        continue
-                    
-                    if response.status_code == 404:
-                        _LOGGER.debug("Not found (404) - trying next endpoint")
-                        continue
-                    
-                    response.raise_for_status()
-                    
-                    data = response.json()
-                    _LOGGER.info("✓ Successfully fetched schedule from %s with %s", url, token_name)
-                    _LOGGER.info("Response: %s", json.dumps(data, indent=2, default=str)[:500])
-                    
-                    if isinstance(data, dict) and "schedule" in data:
-                        return data.get("schedule")
-                    
-                    return data
-                    
-                except Exception as err:
-                    _LOGGER.debug("Error fetching from %s: %s", url, err)
-                    continue
-        
-        _LOGGER.error("Could not fetch schedule from any endpoint for node %s", node_id)
-        return None
-    
-    def _extract_schedule_from_devices(self, devices_data: dict[str, Any], node_id: str) -> dict[str, Any] | None:
-        """Extract schedule for a specific node from the devices response."""
-        _LOGGER.info("=== STARTING SCHEDULE EXTRACTION ===")
-        _LOGGER.info("Looking for node_id: %s", node_id)
-        
+    def _sign_request(self, method: str, url: str, data: dict[str, Any] | None = None) -> dict[str, str]:
+        """Sign a request with AWS SigV4."""
         try:
-            # Write ENTIRE response to file for inspection FIRST
-            try:
-                import os
-                config_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                debug_file = os.path.join(config_dir, "hive_all_devices_debug.json")
-                
-                with open(debug_file, 'w') as f:
-                    json.dump(devices_data, f, indent=2, default=str)
-                
-                _LOGGER.info("✓ Wrote ALL devices response to: %s", debug_file)
-            except Exception as e:
-                _LOGGER.error("Could not write all devices debug file: %s", e)
+            access_key = self.auth.get_access_token()
+            if not access_key:
+                _LOGGER.error("Cannot sign request: No access token available")
+                return {}
             
-            # Structure 1: Check if it's a list
-            if isinstance(devices_data, list):
-                _LOGGER.info("Response is a list with %d items", len(devices_data))
-                
-                # First, log all top-level IDs
-                top_level_ids = []
-                for idx, device in enumerate(devices_data):
-                    device_id = device.get("id") if isinstance(device, dict) else "N/A"
-                    top_level_ids.append(device_id)
-                    device_keys = list(device.keys()) if isinstance(device, dict) else "N/A"
-                    device_type = device.get("type") if isinstance(device, dict) else "N/A"
-                    _LOGGER.info("Item %d: id=%s, type=%s, keys=%s", idx, device_id, device_type, device_keys)
-                
-                _LOGGER.info("Top-level device IDs: %s", top_level_ids)
-                
-                # Now search recursively in all devices for the target node_id
-                _LOGGER.info("Searching recursively for node_id: %s", node_id)
-                for idx, device in enumerate(devices_data):
-                    device_id = device.get("id") if isinstance(device, dict) else "N/A"
-                    _LOGGER.debug("Searching in device %d (id=%s)", idx, device_id)
-                    
-                    # Search this device for the node_id
-                    schedule = self._find_schedule_in_object(device, node_id)
-                    if schedule:
-                        _LOGGER.info("✓ Found schedule for node_id %s in device %d", node_id, idx)
-                        return schedule
-                
-                _LOGGER.warning("Could not find node_id %s in any device", node_id)
-                _LOGGER.info("Target node_id: %s", node_id)
-                _LOGGER.info("Available top-level IDs: %s", top_level_ids)
-                return None
+            # Create a boto session with credentials from Cognito
+            # Note: This is a simplified approach - we're using the access token as a credential
+            boto_session = BotoSession()
             
-            # Structure 2: Check if it's a dict
-            elif isinstance(devices_data, dict):
-                _LOGGER.info("Response is a dict with %d keys", len(devices_data))
-                all_keys = list(devices_data.keys())
-                _LOGGER.info("Dict keys: %s", all_keys)
-                
-                # Try to directly find the node_id as a key
-                if node_id in devices_data:
-                    _LOGGER.info("✓ Found node_id as direct key in response")
-                    node_data = devices_data[node_id]
-                    if isinstance(node_data, dict) and "schedule" in node_data:
-                        _LOGGER.info("✓ Found schedule in direct node_id entry")
-                        return node_data.get("schedule")
-                
-                # Recursively search all values
-                _LOGGER.info("Searching recursively in dict values for node_id: %s", node_id)
-                for key, value in devices_data.items():
-                    if isinstance(value, (dict, list)):
-                        result = self._find_schedule_in_object(value, node_id, 0, f"[key={key}]")
-                        if result:
-                            return result
-                
-                _LOGGER.warning("Could not find node_id %s in dict", node_id)
-                return None
+            # Prepare the request for signing
+            request_body = json.dumps(data) if data else ""
             
-            _LOGGER.warning("Response is neither list nor dict, it's: %s", type(devices_data))
-            return None
+            request = AWSRequest(
+                method=method,
+                url=url,
+                data=request_body,
+                headers=dict(self.session.headers)
+            )
             
-        except Exception as err:
-            _LOGGER.error("Error extracting schedule from devices: %s", err)
-            _LOGGER.error("Traceback: %s", traceback.format_exc())
-            return None
-    
-    def _find_schedule_in_object(self, obj: Any, node_id: str, depth: int = 0, path: str = "") -> dict[str, Any] | None:
-        """Recursively find schedule in an object, optionally associated with a node_id."""
-        if depth > 15:  # Prevent infinite recursion
-            return None
-        
-        if isinstance(obj, dict):
-            current_id = obj.get("id", "")
-            current_path = f"{path}[id={current_id}]" if current_id else path
+            # Get credentials from the Cognito token
+            credentials = boto_session.get_credentials()
             
-            # Log if we find the target node_id
-            if current_id == node_id:
-                _LOGGER.info("Found target node_id at depth %d, path: %s", depth, current_path)
+            # Sign the request
+            SigV4Auth(credentials, self.AWS_SERVICE, self.AWS_REGION).add_auth(request)
             
-            # If this object has schedule, check if it matches our node_id
-            if "schedule" in obj:
-                obj_id = obj.get("id")
-                if obj_id is None or obj_id == node_id:
-                    _LOGGER.info("✓ Found schedule at depth %d, path: %s", depth, current_path)
-                    return obj.get("schedule")
+            return dict(request.headers)
             
-            # Recursively search nested dicts
-            for key, value in obj.items():
-                if isinstance(value, (dict, list)):
-                    result = self._find_schedule_in_object(value, node_id, depth + 1, f"{current_path}.{key}")
-                    if result:
-                        return result
-        
-        elif isinstance(obj, list):
-            # Recursively search list items
-            for idx, item in enumerate(obj):
-                if isinstance(item, (dict, list)):
-                    result = self._find_schedule_in_object(item, node_id, depth + 1, f"{path}[{idx}]")
-                    if result:
-                        return result
-        
-        return None
+        except Exception as e:
+            _LOGGER.warning("Could not sign request with AWS SigV4: %s", e)
+            return dict(self.session.headers)
     
     def update_schedule(self, node_id: str, schedule_data: dict[str, Any]) -> bool:
         """Update the heating schedule for a node."""
-        # Try both ID token and access token
         id_token = self.auth.get_id_token()
-        access_token = self.auth.get_access_token()
         
         if not id_token:
             _LOGGER.error("Cannot update schedule: No auth token available")
             return False
         
-        tokens_to_try = [
-            ("ID Token", id_token),
-            ("Access Token", access_token) if access_token else None
-        ]
-        tokens_to_try = [t for t in tokens_to_try if t is not None]
+        # Use ID token as Authorization header for now (simpler approach)
+        headers = dict(self.session.headers)
+        headers["Authorization"] = id_token
         
         endpoints_to_try = [
             f"{self.BASE_URL}/nodes/heating/{node_id}",
@@ -479,38 +321,34 @@ class HiveScheduleAPI:
             f"{self.BASE_URL}/schedules/{node_id}",
         ]
         
-        for token_name, token in tokens_to_try:
-            _LOGGER.info("Trying update with %s", token_name)
-            _LOGGER.debug("Token (first 50 chars): %s...", token[:50] if token else "None")
-            self.session.headers["Authorization"] = f"Bearer {token}"
-            
-            for url in endpoints_to_try:
-                try:
-                    _LOGGER.info("Attempting to update schedule at: %s with %s", url, token_name)
-                    _LOGGER.debug("Payload: %s", json.dumps(schedule_data, indent=2, default=str))
-                    response = self.session.put(url, json=schedule_data, timeout=30)
-                    
-                    _LOGGER.info("Response status from %s: %d", url, response.status_code)
-                    _LOGGER.debug("Response headers: %s", dict(response.headers))
-                    
-                    if response.text:
-                        _LOGGER.debug("Response body: %s", response.text[:500])
-                    
-                    if response.status_code == 403:
-                        _LOGGER.warning("Access forbidden (403)")
-                        continue
-                    
-                    if response.status_code == 404:
-                        _LOGGER.debug("Not found (404) - trying next endpoint")
-                        continue
-                    
-                    response.raise_for_status()
-                    _LOGGER.info("✓ Successfully updated schedule at %s with %s", url, token_name)
-                    return True
-                    
-                except Exception as err:
-                    _LOGGER.debug("Error updating schedule at %s: %s", url, err)
+        for url in endpoints_to_try:
+            try:
+                _LOGGER.info("Attempting to update schedule at: %s", url)
+                _LOGGER.debug("Payload: %s", json.dumps(schedule_data, indent=2, default=str))
+                
+                response = requests.put(url, json=schedule_data, headers=headers, timeout=30)
+                
+                _LOGGER.info("Response status from %s: %d", url, response.status_code)
+                _LOGGER.debug("Response headers: %s", dict(response.headers))
+                
+                if response.text:
+                    _LOGGER.debug("Response body: %s", response.text[:500])
+                
+                if response.status_code == 403:
+                    _LOGGER.warning("Access forbidden (403)")
                     continue
+                
+                if response.status_code == 404:
+                    _LOGGER.debug("Not found (404) - trying next endpoint")
+                    continue
+                
+                response.raise_for_status()
+                _LOGGER.info("✓ Successfully updated schedule at %s", url)
+                return True
+                
+            except Exception as err:
+                _LOGGER.debug("Error updating schedule at %s: %s", url, err)
+                continue
         
         _LOGGER.error("Could not update schedule at any endpoint for node %s", node_id)
         return False
