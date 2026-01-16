@@ -301,6 +301,8 @@ class HiveScheduleAPI:
                 _LOGGER.debug("Attempting to fetch schedule: %s %s", method, url)
                 response = self.session.get(url, timeout=30)
                 
+                _LOGGER.info("Response status from %s: %d", url, response.status_code)
+                
                 if response.status_code in [403, 404]:
                     _LOGGER.debug("Status %s - trying next endpoint", response.status_code)
                     continue
@@ -309,28 +311,18 @@ class HiveScheduleAPI:
                 
                 data = response.json()
                 _LOGGER.info("✓ Successfully fetched schedule from %s", url)
-                _LOGGER.info("Response from %s: %s", url, json.dumps(data, indent=2, default=str)[:500])
-                
-                # Write response to file
-                try:
-                    import os
-                    config_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                    debug_file = os.path.join(config_dir, f"hive_schedule_{node_id}_{url.split('/')[-2]}.json")
-                    
-                    with open(debug_file, 'w') as f:
-                        json.dump(data, f, indent=2, default=str)
-                    
-                    _LOGGER.info("✓ Wrote response to: %s", debug_file)
-                except Exception as e:
-                    _LOGGER.error("Could not write response file: %s", e)
+                _LOGGER.info("Response keys: %s", list(data.keys()) if isinstance(data, dict) else type(data))
+                _LOGGER.info("Response preview: %s", json.dumps(data, indent=2, default=str)[:500])
                 
                 if isinstance(data, dict) and "schedule" in data:
+                    _LOGGER.info("Found 'schedule' key in response")
                     return data.get("schedule")
                 elif isinstance(data, dict):
+                    _LOGGER.info("Response is dict but no 'schedule' key, returning entire response")
                     return data
                 
             except Exception as err:
-                _LOGGER.debug("Error fetching from %s: %s", url, err)
+                _LOGGER.debug("Error fetching from %s: %s", url, str(err)[:200])
                 continue
         
         _LOGGER.error("Could not fetch schedule from any endpoint for node %s", node_id)
