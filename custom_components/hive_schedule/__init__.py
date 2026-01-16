@@ -136,12 +136,17 @@ class HiveAuth:
                 
                 self._mfa_required = True
                 self._mfa_session = self._cognito
-                self._mfa_session_token = mfa_ex.get_session()
+                
+                # The session token is stored in the cognito object, not in the exception
+                # We need to store the cognito instance which has the session
+                _LOGGER.debug("MFA session stored, awaiting code verification")
                 
                 return False
             
         except Exception as e:
             _LOGGER.error("Failed to authenticate with Hive: %s", e)
+            import traceback
+            _LOGGER.debug("Traceback: %s", traceback.format_exc())
             return False
     
     def verify_mfa_code(self, mfa_code: str) -> bool:
@@ -157,7 +162,7 @@ class HiveAuth:
             _LOGGER.warning("MFA not required - you may already be authenticated")
             return False
         
-        if not self._mfa_session or not self._mfa_session_token:
+        if not self._mfa_session:
             _LOGGER.error("No MFA session available - the session may have expired")
             _LOGGER.info("Attempting to re-authenticate to get a fresh MFA session...")
             
@@ -175,12 +180,10 @@ class HiveAuth:
         
         try:
             _LOGGER.info("Verifying MFA code: %s", mfa_code)
-            _LOGGER.debug("Session token exists: %s", bool(self._mfa_session_token))
             
-            self._mfa_session.respond_to_sms_mfa_challenge(
-                mfa_code,
-                self._mfa_session_token
-            )
+            # The pycognito library's respond_to_sms_mfa_challenge takes just the code
+            # The session information is already stored in the Cognito object
+            self._mfa_session.respond_to_sms_mfa_challenge(mfa_code)
             
             if not self._mfa_session.id_token:
                 _LOGGER.error("MFA verification failed - no tokens received")
@@ -200,6 +203,8 @@ class HiveAuth:
         except Exception as e:
             error_msg = str(e)
             _LOGGER.error("MFA verification failed: %s", error_msg)
+            import traceback
+            _LOGGER.debug("Traceback: %s", traceback.format_exc())
             
             if "CodeMismatchException" in error_msg or "Invalid code" in error_msg:
                 _LOGGER.error("The code you entered is incorrect or has expired")
