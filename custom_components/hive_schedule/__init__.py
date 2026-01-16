@@ -347,20 +347,6 @@ class HiveScheduleAPI:
         _LOGGER.info("Looking for node_id: %s", node_id)
         
         try:
-            # Log the FULL structure for debugging
-            _LOGGER.info("=== DEVICES RESPONSE DEBUG ===")
-            _LOGGER.info("Response type: %s", type(devices_data).__name__)
-            
-            if isinstance(devices_data, dict):
-                _LOGGER.info("Response keys: %s", list(devices_data.keys()))
-            else:
-                _LOGGER.info("Response is not a dict, it's: %s", type(devices_data))
-            
-            response_str = json.dumps(devices_data, indent=2, default=str)
-            _LOGGER.info("Full response length: %d chars", len(response_str))
-            _LOGGER.info("Full response:\n%s", response_str)
-            _LOGGER.info("=== END DEVICES RESPONSE ===")
-            
             # Structure 1: Check if it's a list
             if isinstance(devices_data, list):
                 _LOGGER.info("Response is a list with %d items", len(devices_data))
@@ -369,14 +355,18 @@ class HiveScheduleAPI:
                     device_keys = list(device.keys()) if isinstance(device, dict) else "N/A"
                     _LOGGER.info("Item %d: id=%s, keys=%s", idx, device_id, device_keys)
                     
-                    # Log the full device for first item
+                    # Log the full device for first item to understand structure
                     if idx == 0:
-                        _LOGGER.info("Full first device:\n%s", json.dumps(device, indent=2, default=str))
+                        _LOGGER.info("=== FULL FIRST DEVICE STRUCTURE ===")
+                        _LOGGER.info("%s", json.dumps(device, indent=2, default=str))
+                        _LOGGER.info("=== END FIRST DEVICE ===")
                     
                     # Check if this is the node we're looking for
                     if device_id == node_id:
-                        _LOGGER.info("✓ Found matching node! Keys: %s", device_keys)
-                        _LOGGER.info("Full node data:\n%s", json.dumps(device, indent=2, default=str))
+                        _LOGGER.info("✓ Found matching node with id=%s", node_id)
+                        _LOGGER.info("=== FULL MATCHING DEVICE ===")
+                        _LOGGER.info("%s", json.dumps(device, indent=2, default=str))
+                        _LOGGER.info("=== END MATCHING DEVICE ===")
                         
                         # Now recursively search this device for schedule
                         schedule = self._find_schedule_in_object(device, node_id)
@@ -385,60 +375,9 @@ class HiveScheduleAPI:
                             return schedule
                         else:
                             _LOGGER.warning("Found matching node but no schedule inside it")
-                    
-                    # Also check if node_id is nested somewhere in this device
-                    if self._contains_node_id(device, node_id):
-                        _LOGGER.info("Item %d contains node_id %s somewhere inside", idx, node_id)
-                        schedule = self._find_schedule_in_object(device, node_id)
-                        if schedule:
-                            _LOGGER.info("✓ Found schedule in nested node")
-                            return schedule
+                            return None
             
-            # Structure 2: Check for 'devices' key
-            if isinstance(devices_data, dict) and "devices" in devices_data:
-                _LOGGER.info("Found 'devices' key in response")
-                devices_list = devices_data.get("devices", [])
-                _LOGGER.info("devices is a: %s with %d items", type(devices_list).__name__, len(devices_list) if isinstance(devices_list, (list, dict)) else "N/A")
-                
-                if isinstance(devices_list, list):
-                    for idx, device in enumerate(devices_list):
-                        device_id = device.get("id") if isinstance(device, dict) else "N/A"
-                        _LOGGER.info("Device %d in devices list: id=%s", idx, device_id)
-                        if device_id == node_id and "schedule" in device:
-                            _LOGGER.info("✓ Found schedule in devices list")
-                            return device.get("schedule")
-            
-            # Structure 3: Check for 'nodes' key
-            if isinstance(devices_data, dict) and "nodes" in devices_data:
-                _LOGGER.info("Found 'nodes' key in response")
-                nodes_list = devices_data.get("nodes", [])
-                _LOGGER.info("nodes is a: %s", type(nodes_list).__name__)
-                
-                if isinstance(nodes_list, list):
-                    for idx, node in enumerate(nodes_list):
-                        node_id_found = node.get("id") if isinstance(node, dict) else "N/A"
-                        _LOGGER.info("Node %d in nodes list: id=%s", idx, node_id_found)
-                        if node_id_found == node_id and "schedule" in node:
-                            _LOGGER.info("✓ Found schedule in nodes list")
-                            return node.get("schedule")
-            
-            # Structure 4: Check for 'heating' key
-            if isinstance(devices_data, dict) and "heating" in devices_data:
-                _LOGGER.info("Found 'heating' key in response")
-                heating = devices_data.get("heating", {})
-                _LOGGER.info("heating is a: %s", type(heating).__name__)
-                
-                if isinstance(heating, dict):
-                    if "schedule" in heating:
-                        _LOGGER.info("✓ Found schedule directly in heating key")
-                        return heating.get("schedule")
-                    if node_id in heating:
-                        node = heating.get(node_id, {})
-                        if "schedule" in node:
-                            _LOGGER.info("✓ Found schedule in heating[%s]", node_id)
-                            return node.get("schedule")
-            
-            _LOGGER.warning("Could not find schedule for node %s using standard structures", node_id)
+            _LOGGER.warning("Could not find node %s in devices list", node_id)
             return None
             
         except Exception as err:
