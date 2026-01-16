@@ -285,44 +285,44 @@ class HiveScheduleAPI:
             _LOGGER.error("Cannot get schedule: No auth token available")
             return None
         
-        self.session.headers["Authorization"] = token
+        # Set Authorization header with Bearer token
+        self.session.headers["Authorization"] = f"Bearer {token}"
         
         # First try direct endpoints for the node_id
         endpoints_to_try = [
-            (f"{self.BASE_URL}/nodes/heating/{node_id}", "GET"),
-            (f"{self.BASE_URL}/nodes/{node_id}", "GET"),
-            (f"{self.BASE_URL}/heating/{node_id}", "GET"),
-            (f"{self.BASE_URL}/schedules/{node_id}", "GET"),
-            (f"{self.BASE_URL}/schedule/{node_id}", "GET"),
+            f"{self.BASE_URL}/nodes/heating/{node_id}",
+            f"{self.BASE_URL}/heating/{node_id}",
+            f"{self.BASE_URL}/schedules/{node_id}",
         ]
         
-        for url, method in endpoints_to_try:
+        for url in endpoints_to_try:
             try:
-                _LOGGER.debug("Attempting to fetch schedule: %s %s", method, url)
+                _LOGGER.debug("Attempting to fetch schedule from: %s", url)
                 response = self.session.get(url, timeout=30)
                 
                 _LOGGER.info("Response status from %s: %d", url, response.status_code)
                 
-                if response.status_code in [403, 404]:
-                    _LOGGER.debug("Status %s - trying next endpoint", response.status_code)
+                if response.status_code == 403:
+                    _LOGGER.warning("Access forbidden (403) - token may be invalid")
+                    continue
+                
+                if response.status_code == 404:
+                    _LOGGER.debug("Not found (404) - trying next endpoint")
                     continue
                 
                 response.raise_for_status()
                 
                 data = response.json()
                 _LOGGER.info("✓ Successfully fetched schedule from %s", url)
-                _LOGGER.info("Response keys: %s", list(data.keys()) if isinstance(data, dict) else type(data))
-                _LOGGER.info("Response preview: %s", json.dumps(data, indent=2, default=str)[:500])
+                _LOGGER.info("Response: %s", json.dumps(data, indent=2, default=str)[:500])
                 
                 if isinstance(data, dict) and "schedule" in data:
-                    _LOGGER.info("Found 'schedule' key in response")
                     return data.get("schedule")
-                elif isinstance(data, dict):
-                    _LOGGER.info("Response is dict but no 'schedule' key, returning entire response")
-                    return data
+                
+                return data
                 
             except Exception as err:
-                _LOGGER.debug("Error fetching from %s: %s", url, str(err)[:200])
+                _LOGGER.debug("Error fetching from %s: %s", url, err)
                 continue
         
         _LOGGER.error("Could not fetch schedule from any endpoint for node %s", node_id)
@@ -457,9 +457,9 @@ class HiveScheduleAPI:
             _LOGGER.error("Cannot update schedule: No auth token available")
             return False
         
-        self.session.headers["Authorization"] = token
+        # Set Authorization header with Bearer token
+        self.session.headers["Authorization"] = f"Bearer {token}"
         
-        # Try multiple endpoints
         endpoints_to_try = [
             f"{self.BASE_URL}/nodes/heating/{node_id}",
             f"{self.BASE_URL}/heating/{node_id}",
@@ -469,10 +469,17 @@ class HiveScheduleAPI:
         for url in endpoints_to_try:
             try:
                 _LOGGER.info("Attempting to update schedule at: %s", url)
+                _LOGGER.debug("Payload: %s", json.dumps(schedule_data, indent=2, default=str))
                 response = self.session.put(url, json=schedule_data, timeout=30)
                 
-                if response.status_code in [403, 404]:
-                    _LOGGER.debug("Status %s - trying next endpoint", response.status_code)
+                _LOGGER.info("Response status from %s: %d", url, response.status_code)
+                
+                if response.status_code == 403:
+                    _LOGGER.warning("Access forbidden (403) - token may be invalid")
+                    continue
+                
+                if response.status_code == 404:
+                    _LOGGER.debug("Not found (404) - trying next endpoint")
                     continue
                 
                 response.raise_for_status()
