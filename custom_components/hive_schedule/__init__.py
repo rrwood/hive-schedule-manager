@@ -607,15 +607,15 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         _LOGGER.info("Setting schedule for %s on node %s", day, node_id)
         _LOGGER.debug("New schedule for %s: %s", day, day_schedule)
         
-        current_schedule = await hass.async_add_executor_job(api.get_schedule, node_id)
-        
-        if current_schedule is None:
-            _LOGGER.error("Could not fetch current schedule - cannot safely update single day")
-            raise HomeAssistantError(
-                "Unable to fetch current schedule. Please use set_heating_schedule to set complete schedule."
-            )
-        
+        # For set_day_schedule, we'll create a complete week with the new day
+        # and default schedules for other days
         schedule_data: dict[str, Any] = {"schedule": {}}
+        
+        default_schedule = [
+            api.build_schedule_entry("00:00", 16.0),
+            api.build_schedule_entry("08:00", 18.0),
+            api.build_schedule_entry("22:00", 16.0)
+        ]
         
         for d in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
             if d == day:
@@ -623,18 +623,18 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
                     api.build_schedule_entry(entry["time"], entry["temp"])
                     for entry in day_schedule
                 ]
-                _LOGGER.info("Updated %s: %s", d, json.dumps(schedule_data["schedule"][d], indent=2))
+                _LOGGER.info("Updated %s with new schedule: %s", d, json.dumps(schedule_data["schedule"][d], indent=2))
             else:
-                if d in current_schedule:
-                    schedule_data["schedule"][d] = current_schedule[d]
-                    _LOGGER.info("Preserved %s: %s", d, json.dumps(current_schedule[d], indent=2, default=str))
-                else:
-                    _LOGGER.error("Day %s missing from fetched schedule!", d)
-                    raise HomeAssistantError(f"Schedule for {d} missing in response")
+                # Use default schedule for other days
+                schedule_data["schedule"][d] = default_schedule
+                _LOGGER.info("Set %s to default schedule", d)
         
         _LOGGER.info("Complete schedule to send: %s", json.dumps(schedule_data, indent=2, default=str))
-        await hass.async_add_executor_job(api.update_schedule, node_id, schedule_data)
-    
+        success = await hass.async_add_executor_job(api.update_schedule, node_id, schedule_data)
+        
+        if not success:
+            raise HomeAssistantError(f"Failed to update schedule for {day}")
+
     async def handle_calendar_update(call: ServiceCall) -> None:
         """Handle update_from_calendar service call."""
         node_id = call.data[ATTR_NODE_ID]
