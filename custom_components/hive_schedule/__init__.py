@@ -118,6 +118,9 @@ class HiveScheduleAPI:
         """Convert time string to minutes from midnight."""
         h, m = map(int, time_str.split(":"))
         return h * 60 + m
+        """Convert time string to minutes from midnight."""
+        h, m = map(int, time_str.split(":"))
+        return h * 60 + m
     
     def build_schedule_entry(self, time_str: str, temp: float) -> dict[str, Any]:
         """Build a single schedule entry."""
@@ -125,22 +128,6 @@ class HiveScheduleAPI:
             "value": {"target": float(temp)},
             "start": self.time_to_minutes(time_str)
         }
-    
-    async def _get_auth_header(self) -> str | None:
-        """Get current authorization header value."""
-        if self._token:
-            return self._token
-        
-        # Try to get token from Hive API
-        if self._hive_api and hasattr(self._hive_api, 'auth'):
-            auth = self._hive_api.auth
-            if hasattr(auth, 'access_token'):
-                token = auth.access_token
-                if token:
-                    _LOGGER.debug("Using token from Hive API client")
-                    return token
-        
-        return None
     
     def update_schedule(self, node_id: str, schedule_data: dict[str, Any]) -> bool:
         """Send schedule update to Hive."""
@@ -150,10 +137,15 @@ class HiveScheduleAPI:
                 "Hive authentication not available. Ensure Hive integration is loaded."
             )
         
-        # Get current token (might be from Hive API)
-        import asyncio
-        loop = asyncio.get_event_loop()
-        token = loop.run_until_complete(self._get_auth_header())
+        # Use stored token or get from Hive API
+        token = self._token
+        
+        # If no stored token, try to get from Hive API
+        if not token and self._hive_api and hasattr(self._hive_api, 'auth'):
+            auth = self._hive_api.auth
+            if hasattr(auth, 'access_token'):
+                token = auth.access_token
+                _LOGGER.debug("Using token from Hive API client")
         
         if not token:
             _LOGGER.error("Cannot update schedule: Unable to get auth token")
@@ -589,40 +581,45 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
                     for device_id, device_data in devices.items():
                         _LOGGER.warning("")
                         _LOGGER.warning("Device ID: %s", device_id)
-                        _LOGGER.warning("  Type: %s", type(device_data).__name__)
                         
                         if isinstance(device_data, dict):
-                            _LOGGER.warning("  Keys: %s", list(device_data.keys())[:20])
+                            # Extract useful info
+                            device_name = device_data.get('hiveName') or device_data.get('device_name') or device_data.get('haName', 'Unknown')
+                            device_type = device_data.get('hiveType') or device_data.get('haType', 'unknown')
                             
-                            # Look for heating/climate related data
-                            for key, value in device_data.items():
-                                if 'heating' in str(key).lower() or 'climate' in str(key).lower() or 'thermostat' in str(key).lower():
-                                    _LOGGER.warning("    %s: %s", key, value)
-                                if key in ['type', 'model', 'name', 'deviceType']:
-                                    _LOGGER.warning("    %s: %s", key, value)
-                        
-                        # The device_id itself might be the node_id
-                        if len(device_id) > 20:  # UUIDs are typically 36 chars
-                            _LOGGER.warning("  ★ This might be your node_id: %s", device_id)
-                
-                # Check deviceList
-                if hasattr(runtime, 'deviceList'):
-                    device_list = runtime.deviceList
-                    _LOGGER.warning("")
-                    _LOGGER.warning("Found %d devices in deviceList:", len(device_list))
-                    
-                    for device_id, device_info in device_list.items():
-                        _LOGGER.warning("")
-                        _LOGGER.warning("Device: %s", device_id)
-                        if isinstance(device_info, dict):
-                            device_type = device_info.get('type', 'unknown')
-                            device_name = device_info.get('state', {}).get('name', 'unknown')
                             _LOGGER.warning("  Name: %s", device_name)
                             _LOGGER.warning("  Type: %s", device_type)
                             
-                            if 'heating' in device_type.lower() or 'thermostat' in device_type.lower():
+                            # Check if this is a heating device
+                            if 'heating' in str(device_type).lower() or 'thermostat' in str(device_type).lower() or 'climate' in str(device_type).lower():
                                 _LOGGER.warning("  ★★★ HEATING DEVICE FOUND ★★★")
                                 _LOGGER.warning("  ★★★ Use this node_id: %s", device_id)
+                                _LOGGER.warning("  ★★★ Device name: %s", device_name)
+                            elif len(device_id) > 20:  # UUIDs are typically 36 chars
+                                _LOGGER.warning("  → Possible node_id (check if this is your heating)")
+                
+                # Also try to match with climate entity
+                _LOGGER.warning("")
+                _LOGGER.warning("Cross-referencing with Home Assistant climate entities:")
+                for state in hass.states.async_all("climate"):
+                    _LOGGER.warning("  Climate entity: %s", state.entity_id)
+                    _LOGGER.warning("    Friendly name: %s", state.attributes.get('friendly_name', 'Unknown'))
+                    
+                    # Try to find matching device
+                    entity_id_parts = state.entity_id.split('.')
+                    if len(entity_id_parts) > 1:
+                        entity_name = entity_id_parts[1]
+                        
+                        # Look for matching device
+                        for device_id, device_data in runtime.devices.items():
+                            if isinstance(device_data, dict):
+                                device_name = (device_data.get('hiveName') or 
+                                             device_data.get('device_name') or 
+                                             device_data.get('haName', '')).lower()
+                                
+                                if entity_name in device_name or device_name in entity_name:
+                                    _LOGGER.warning("    ★★★ MATCHED to device ID: %s", device_id)
+                                    _LOGGER.warning("    ★★★ Use this as your node_id!")
         
         _LOGGER.warning("")
         _LOGGER.warning("=" * 80)
