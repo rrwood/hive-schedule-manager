@@ -105,6 +105,7 @@ class HiveAuth:
         self._token_expiry = None
         self._mfa_required = False
         self._mfa_session = None
+        self._challenge_parameters = None
     
     def authenticate(self, mfa_code: str | None = None) -> bool:
         """Authenticate with Hive via AWS Cognito."""
@@ -123,7 +124,27 @@ class HiveAuth:
                 return self.verify_mfa(mfa_code)
             
             # Initial authentication attempt
-            self._cognito.authenticate(password=self.password)
+            try:
+                self._cognito.authenticate(password=self.password)
+            except ClientError as auth_error:
+                error_code = auth_error.response.get("Error", {}).get("Code", "")
+                error_message = str(auth_error)
+                
+                _LOGGER.debug("Authentication error code: %s", error_code)
+                _LOGGER.debug("Authentication error message: %s", error_message)
+                
+                # Check if MFA is required - look for SMS_MFA or SOFTWARE_TOKEN_MFA challenges
+                if error_code in ["UserMFATypeNotFound", "SMS_MFA", "SOFTWARE_TOKEN_MFA"] or "mfa" in error_message.lower():
+                    self._mfa_required = True
+                    self._mfa_session = self._cognito
+                    # Store challenge parameters if available
+                    if hasattr(auth_error.response.get("Error", {}), "get"):
+                        self._challenge_parameters = auth_error.response.get("Error", {}).get("ChallengeParameters")
+                    _LOGGER.info("MFA required - SMS code has been sent to your registered phone")
+                    return False
+                
+                # If not MFA, re-raise
+                raise
             
             self._id_token = self._cognito.id_token
             self._access_token = self._cognito.access_token
@@ -137,8 +158,10 @@ class HiveAuth:
             error_code = e.response.get("Error", {}).get("Code", "")
             error_message = str(e)
             
+            _LOGGER.debug("ClientError - Code: %s, Message: %s", error_code, error_message)
+            
             # Check if MFA is required
-            if error_code == "UserMFATypeNotFound" or "mfa" in error_message.lower():
+            if error_code in ["UserMFATypeNotFound", "SMS_MFA", "SOFTWARE_TOKEN_MFA"] or "mfa" in error_message.lower():
                 self._mfa_required = True
                 self._mfa_session = self._cognito
                 _LOGGER.info("MFA required - SMS code has been sent to your registered phone")
@@ -149,31 +172,65 @@ class HiveAuth:
             
         except Exception as e:
             _LOGGER.error("Failed to authenticate with Hive: %s", e)
+            _LOGGER.debug("Exception type: %s", type(e).__name__)
             return False
     
     def verify_mfa(self, mfa_code: str) -> bool:
         """Verify MFA code and complete authentication."""
         try:
-            if not self._cognito:
-                _LOGGER.error("No active authentication session for MFA verification")
+            if not self._cognito or not self._mfa_required:
+                _LOGGER.error("No active MFA session - cannot verify code")
                 return False
             
             _LOGGER.debug("Verifying MFA code...")
             
-            # Respond to MFA challenge
-            self._cognito.respond_to_authentication_challenge(mfa_code)
+            # Try different methods to respond to MFA challenge
+            try:
+                # Method 1: Use respond_to_auth_challenge with ANSWER
+                _LOGGER.debug("Attempting MFA verification with respond_to_auth_challenge...")
+                self._cognito.respond_to_auth_challenge(mfa_code)
+            except AttributeError:
+                try:
+                    # Method 2: Use admin_respond_to_auth_challenge
+                    _LOGGER.debug("Attempting MFA verification with admin_respond_to_auth_challenge...")
+                    self._cognito.admin_respond_to_auth_challenge(mfa_code)
+                except AttributeError:
+                    try:
+                        # Method 3: Re-authenticate with MFA code parameter
+                        _LOGGER.debug("Attempting MFA verification by re-authenticating with MFA code...")
+                        self._cognito.authenticate(password=self.password, mfa_code=mfa_code)
+                    except Exception as inner_e:
+                        _LOGGER.debug("Re-authenticate with MFA failed: %s", inner_e)
+                        # Method 4: Direct boto3 client interaction
+                        _LOGGER.debug("Attempting direct boto3 client MFA response...")
+                        client = self._cognito.client
+                        response = client.respond_to_auth_challenge(
+                            ClientId=COGNITO_CLIENT_ID,
+                            ChallengeName="SMS_MFA",
+                            ChallengeResponse={"USERNAME": self.username, "SMS_MFA_CODE": mfa_code},
+                            Session=getattr(self._cognito, "session", None)
+                        )
+                        self._cognito.id_token = response.get("AuthenticationResult", {}).get("IdToken")
+                        self._cognito.access_token = response.get("AuthenticationResult", {}).get("AccessToken")
             
             self._id_token = self._cognito.id_token
             self._access_token = self._cognito.access_token
             self._token_expiry = datetime.now() + timedelta(minutes=55)
             self._mfa_required = False
             self._mfa_session = None
+            self._challenge_parameters = None
             
             _LOGGER.info("✓ MFA verification successful - authenticated with Hive")
             return True
             
+        except ClientError as e:
+            error_code = e.response.get("Error", {}).get("Code", "")
+            _LOGGER.error("MFA verification failed - ClientError Code: %s", error_code)
+            _LOGGER.error("MFA verification failed: %s", e)
+            return False
         except Exception as e:
             _LOGGER.error("MFA verification failed: %s", e)
+            _LOGGER.debug("Exception type: %s", type(e).__name__)
             return False
     
     def is_mfa_required(self) -> bool:
@@ -192,7 +249,7 @@ class HiveAuth:
                 self._cognito.renew_access_token()
                 self._id_token = self._cognito.id_token
                 self._access_token = self._cognito.access_token
-                self._token_expiry = datetime.now() + timedelta(minutes=55)  # Tokens expire after 1 hour, refresh at 55 min
+                self._token_expiry = datetime.now() + timedelta(minutes=55)
                 _LOGGER.info("✓ Token refreshed successfully")
                 return True
         except Exception as e:
