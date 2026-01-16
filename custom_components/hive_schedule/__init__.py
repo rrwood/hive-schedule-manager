@@ -162,49 +162,75 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     def get_hive_auth_token() -> str | None:
         """Extract auth token from existing Hive integration."""
         if "hive" not in hass.data:
-            _LOGGER.debug("Hive integration not yet in hass.data")
+            _LOGGER.warning("Hive integration not yet in hass.data")
+            _LOGGER.info("Available keys in hass.data: %s", list(hass.data.keys()))
             return None
         
         try:
             hive_data = hass.data.get("hive")
-            if not hive_data or not isinstance(hive_data, dict):
-                _LOGGER.debug("Hive data not in expected format")
-                return None
+            _LOGGER.info("=== HIVE DATA STRUCTURE DEBUG ===")
+            _LOGGER.info("hive_data type: %s", type(hive_data))
+            _LOGGER.info("hive_data is dict: %s", isinstance(hive_data, dict))
             
-            # In modern Hive integration, data is stored as:
-            # hass.data["hive"][entry_id] = Hive object
-            # The Hive object has: session.auth.token
-            
-            for entry_id, hive_obj in hive_data.items():
-                _LOGGER.debug("Checking Hive entry: %s, type: %s", entry_id, type(hive_obj))
+            if isinstance(hive_data, dict):
+                _LOGGER.info("hive_data keys: %s", list(hive_data.keys()))
                 
-                # Try to access session.auth.token (apyhiveapi structure)
-                if hasattr(hive_obj, "session"):
-                    session = hive_obj.session
-                    _LOGGER.debug("Found session object: %s", type(session))
+                for key, value in hive_data.items():
+                    _LOGGER.info("  Key: %s", key)
+                    _LOGGER.info("    Type: %s", type(value))
+                    _LOGGER.info("    Has __dict__: %s", hasattr(value, "__dict__"))
                     
-                    if hasattr(session, "auth"):
-                        auth = session.auth
-                        _LOGGER.debug("Found auth object: %s", type(auth))
+                    if hasattr(value, "__dict__"):
+                        attrs = [a for a in dir(value) if not a.startswith("_")]
+                        _LOGGER.info("    Public attributes: %s", attrs[:10])  # First 10
+                    
+                    # Check for session
+                    if hasattr(value, "session"):
+                        _LOGGER.info("    ✓ Has 'session' attribute")
+                        session = value.session
+                        _LOGGER.info("      session type: %s", type(session))
                         
-                        # The auth object should have tokenData
-                        if hasattr(auth, "tokenData") and isinstance(auth.tokenData, dict):
-                            # Token is in tokenData["IdToken"]
-                            token = auth.tokenData.get("IdToken")
-                            if token:
-                                _LOGGER.info("Successfully retrieved Hive auth token from session.auth.tokenData")
-                                return token
+                        if hasattr(session, "__dict__"):
+                            sess_attrs = [a for a in dir(session) if not a.startswith("_")]
+                            _LOGGER.info("      session attributes: %s", sess_attrs[:10])
                         
-                        # Fallback: try direct token attribute
-                        if hasattr(auth, "token"):
-                            token = auth.token
-                            if token:
-                                _LOGGER.info("Successfully retrieved Hive auth token from session.auth.token")
-                                return token
+                        # Check for auth
+                        if hasattr(session, "auth"):
+                            _LOGGER.info("      ✓ Has 'auth' attribute")
+                            auth = session.auth
+                            _LOGGER.info("        auth type: %s", type(auth))
+                            
+                            if hasattr(auth, "__dict__"):
+                                auth_attrs = [a for a in dir(auth) if not a.startswith("_")]
+                                _LOGGER.info("        auth attributes: %s", auth_attrs)
+                            
+                            # Check all possible token locations
+                            if hasattr(auth, "tokenData"):
+                                _LOGGER.info("        ✓ Has 'tokenData'")
+                                token_data = auth.tokenData
+                                if isinstance(token_data, dict):
+                                    _LOGGER.info("          tokenData keys: %s", list(token_data.keys()))
+                                    if "IdToken" in token_data:
+                                        token = token_data["IdToken"]
+                                        _LOGGER.info("          ✓✓✓ FOUND TOKEN in tokenData['IdToken'] (length: %d)", len(token))
+                                        return token
+                            
+                            if hasattr(auth, "token"):
+                                token = auth.token
+                                _LOGGER.info("        ✓ Has 'token' attribute (value type: %s)", type(token))
+                                if token:
+                                    _LOGGER.info("          ✓✓✓ FOUND TOKEN in auth.token (length: %d)", len(str(token)))
+                                    return token
+                            
+                            if hasattr(auth, "accessToken"):
+                                token = auth.accessToken
+                                if token:
+                                    _LOGGER.info("        ✓✓✓ FOUND TOKEN in auth.accessToken")
+                                    return token
             
-            _LOGGER.warning("Hive integration loaded but could not find auth token")
+            _LOGGER.error("=== TOKEN NOT FOUND - Check debug output above ===")
             
-        except (KeyError, AttributeError, TypeError) as err:
+        except Exception as err:
             _LOGGER.error("Error accessing Hive auth token: %s", err, exc_info=True)
         
         return None
