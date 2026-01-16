@@ -350,34 +350,39 @@ class HiveScheduleAPI:
             # Structure 1: Check if it's a list
             if isinstance(devices_data, list):
                 _LOGGER.info("Response is a list with %d items", len(devices_data))
+                
+                # First, log all top-level IDs
+                top_level_ids = []
                 for idx, device in enumerate(devices_data):
                     device_id = device.get("id") if isinstance(device, dict) else "N/A"
+                    top_level_ids.append(device_id)
                     device_keys = list(device.keys()) if isinstance(device, dict) else "N/A"
                     _LOGGER.info("Item %d: id=%s, keys=%s", idx, device_id, device_keys)
+                
+                _LOGGER.info("Top-level device IDs: %s", top_level_ids)
+                
+                # Now search recursively in all devices for the target node_id
+                _LOGGER.info("Searching recursively for node_id: %s", node_id)
+                for idx, device in enumerate(devices_data):
+                    _LOGGER.debug("Searching in device %d (id=%s)", idx, device.get("id") if isinstance(device, dict) else "N/A")
                     
-                    # Log the full device for first item to understand structure
-                    if idx == 0:
-                        _LOGGER.info("=== FULL FIRST DEVICE STRUCTURE ===")
-                        _LOGGER.info("%s", json.dumps(device, indent=2, default=str))
-                        _LOGGER.info("=== END FIRST DEVICE ===")
+                    # Log structure of this device (with size limit to avoid huge logs)
+                    if isinstance(device, dict):
+                        device_str = json.dumps(device, indent=2, default=str)[:1000]
+                        _LOGGER.debug("Device %d structure (first 1000 chars):\n%s", idx, device_str)
                     
-                    # Check if this is the node we're looking for
-                    if device_id == node_id:
-                        _LOGGER.info("✓ Found matching node with id=%s", node_id)
-                        _LOGGER.info("=== FULL MATCHING DEVICE ===")
-                        _LOGGER.info("%s", json.dumps(device, indent=2, default=str))
-                        _LOGGER.info("=== END MATCHING DEVICE ===")
-                        
-                        # Now recursively search this device for schedule
-                        schedule = self._find_schedule_in_object(device, node_id)
-                        if schedule:
-                            _LOGGER.info("✓ Found schedule in matching node")
-                            return schedule
-                        else:
-                            _LOGGER.warning("Found matching node but no schedule inside it")
-                            return None
+                    # Search this device for the node_id
+                    schedule = self._find_schedule_in_object(device, node_id)
+                    if schedule:
+                        _LOGGER.info("✓ Found schedule for node_id %s in device %d", node_id, idx)
+                        return schedule
+                
+                _LOGGER.warning("Could not find node_id %s in any device", node_id)
+                _LOGGER.info("Target node_id: %s", node_id)
+                _LOGGER.info("Available top-level IDs: %s", top_level_ids)
+                return None
             
-            _LOGGER.warning("Could not find node %s in devices list", node_id)
+            _LOGGER.warning("Response is not a list, it's: %s", type(devices_data))
             return None
             
         except Exception as err:
@@ -385,49 +390,40 @@ class HiveScheduleAPI:
             _LOGGER.error("Traceback: %s", traceback.format_exc())
             return None
     
-    def _contains_node_id(self, obj: Any, target_id: str, depth: int = 0) -> bool:
-        """Check if an object contains the target node_id anywhere inside."""
-        if depth > 5:  # Prevent deep recursion
-            return False
-        
-        if isinstance(obj, dict):
-            if obj.get("id") == target_id:
-                return True
-            for value in obj.values():
-                if self._contains_node_id(value, target_id, depth + 1):
-                    return True
-        elif isinstance(obj, list):
-            for item in obj:
-                if self._contains_node_id(item, target_id, depth + 1):
-                    return True
-        
-        return False
-    
-    def _find_schedule_in_object(self, obj: Any, node_id: str, depth: int = 0) -> dict[str, Any] | None:
+    def _find_schedule_in_object(self, obj: Any, node_id: str, depth: int = 0, path: str = "") -> dict[str, Any] | None:
         """Recursively find schedule in an object, optionally associated with a node_id."""
-        if depth > 10:  # Prevent infinite recursion
+        if depth > 15:  # Prevent infinite recursion
             return None
         
         if isinstance(obj, dict):
-            # If this object has schedule and either no id or matching id, return it
+            current_id = obj.get("id", "")
+            current_path = f"{path}[id={current_id}]" if current_id else path
+            
+            # Log if we find the target node_id
+            if current_id == node_id:
+                _LOGGER.info("Found target node_id at depth %d, path: %s", depth, current_path)
+            
+            # If this object has schedule, check if it matches our node_id
             if "schedule" in obj:
                 obj_id = obj.get("id")
                 if obj_id is None or obj_id == node_id:
-                    _LOGGER.info("Found schedule at depth %d", depth)
+                    _LOGGER.info("✓ Found schedule at depth %d, path: %s", depth, current_path)
                     return obj.get("schedule")
             
             # Recursively search nested dicts
             for key, value in obj.items():
-                result = self._find_schedule_in_object(value, node_id, depth + 1)
-                if result:
-                    return result
+                if isinstance(value, (dict, list)):
+                    result = self._find_schedule_in_object(value, node_id, depth + 1, f"{current_path}.{key}")
+                    if result:
+                        return result
         
         elif isinstance(obj, list):
             # Recursively search list items
-            for item in obj:
-                result = self._find_schedule_in_object(item, node_id, depth + 1)
-                if result:
-                    return result
+            for idx, item in enumerate(obj):
+                if isinstance(item, (dict, list)):
+                    result = self._find_schedule_in_object(item, node_id, depth + 1, f"{path}[{idx}]")
+                    if result:
+                        return result
         
         return None
 
