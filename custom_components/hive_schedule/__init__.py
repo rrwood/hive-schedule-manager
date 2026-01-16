@@ -456,6 +456,43 @@ class HiveScheduleAPI:
                         return result
         
         return None
+    
+    def update_schedule(self, node_id: str, schedule_data: dict[str, Any]) -> bool:
+        """Update the heating schedule for a node."""
+        token = self.auth.get_id_token()
+        
+        if not token:
+            _LOGGER.error("Cannot update schedule: No auth token available")
+            return False
+        
+        self.session.headers["Authorization"] = token
+        
+        # Try multiple endpoints
+        endpoints_to_try = [
+            f"{self.BASE_URL}/nodes/heating/{node_id}",
+            f"{self.BASE_URL}/heating/{node_id}",
+            f"{self.BASE_URL}/schedules/{node_id}",
+        ]
+        
+        for url in endpoints_to_try:
+            try:
+                _LOGGER.info("Attempting to update schedule at: %s", url)
+                response = self.session.put(url, json=schedule_data, timeout=30)
+                
+                if response.status_code in [403, 404]:
+                    _LOGGER.debug("Status %s - trying next endpoint", response.status_code)
+                    continue
+                
+                response.raise_for_status()
+                _LOGGER.info("✓ Successfully updated schedule at %s", url)
+                return True
+                
+            except Exception as err:
+                _LOGGER.debug("Error updating schedule at %s: %s", url, err)
+                continue
+        
+        _LOGGER.error("Could not update schedule at any endpoint for node %s", node_id)
+        return False
 
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     """Set up the Hive Schedule Manager component."""
