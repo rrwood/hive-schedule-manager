@@ -350,8 +350,15 @@ class HiveScheduleAPI:
             
             data = response.json()
             if "schedule" in data:
+                schedule = data.get("schedule", {})
                 _LOGGER.debug("✓ Successfully fetched schedule for node %s", node_id)
-                return data.get("schedule", {})
+                _LOGGER.debug("Schedule structure: %s", {k: type(v).__name__ + f"(len={len(v) if isinstance(v, list) else 'N/A'})" for k, v in schedule.items()}))
+                if schedule:
+                    # Log first day's schedule as example
+                    first_day = next(iter(schedule.items()), None)
+                    if first_day:
+                        _LOGGER.debug("Example %s schedule: %s", first_day[0], first_day[1][:1] if isinstance(first_day[1], list) else first_day[1])
+                return schedule
             else:
                 _LOGGER.warning("No schedule data in response")
                 return None
