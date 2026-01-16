@@ -269,6 +269,20 @@ class HiveScheduleAPI:
             "Referer": "https://my.hivehome.com/"
         })
     
+    @staticmethod
+    def time_to_minutes(time_str: str) -> int:
+        """Convert time string to minutes from midnight."""
+        h, m = map(int, time_str.split(":"))
+        return h * 60 + m
+    
+    @staticmethod
+    def build_schedule_entry(time_str: str, temp: float) -> dict[str, Any]:
+        """Build a single schedule entry."""
+        return {
+            "value": {"target": float(temp)},
+            "start": HiveScheduleAPI.time_to_minutes(time_str)
+        }
+    
     def _sign_request(self, method: str, url: str, data: dict[str, Any] | None = None) -> dict[str, str]:
         """Sign a request with AWS SigV4."""
         try:
@@ -431,12 +445,12 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
                 day_schedule = []
                 for entry in schedule_config[day]:
                     day_schedule.append(
-                        api.build_schedule_entry(entry["time"], entry["temp"])
+                        HiveScheduleAPI.build_schedule_entry(entry["time"], entry["temp"])
                     )
                 schedule_data["schedule"][day] = day_schedule
             else:
                 schedule_data["schedule"][day] = [
-                    api.build_schedule_entry("00:00", 16.0)
+                    HiveScheduleAPI.build_schedule_entry("00:00", 16.0)
                 ]
         
         await hass.async_add_executor_job(api.update_schedule, node_id, schedule_data)
@@ -455,15 +469,15 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         schedule_data: dict[str, Any] = {"schedule": {}}
         
         default_schedule = [
-            api.build_schedule_entry("00:00", 16.0),
-            api.build_schedule_entry("08:00", 18.0),
-            api.build_schedule_entry("22:00", 16.0)
+            HiveScheduleAPI.build_schedule_entry("00:00", 16.0),
+            HiveScheduleAPI.build_schedule_entry("08:00", 18.0),
+            HiveScheduleAPI.build_schedule_entry("22:00", 16.0)
         ]
         
         for d in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
             if d == day:
                 schedule_data["schedule"][d] = [
-                    api.build_schedule_entry(entry["time"], entry["temp"])
+                    HiveScheduleAPI.build_schedule_entry(entry["time"], entry["temp"])
                     for entry in day_schedule
                 ]
                 _LOGGER.info("Updated %s with new schedule: %s", d, json.dumps(schedule_data["schedule"][d], indent=2))
