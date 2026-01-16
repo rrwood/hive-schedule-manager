@@ -166,56 +166,46 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
             return None
         
         try:
-            # Get all Hive config entries
-            hive_entries = hass.config_entries.async_entries("hive")
-            if not hive_entries:
-                _LOGGER.debug("No Hive config entries found")
+            hive_data = hass.data.get("hive")
+            if not hive_data or not isinstance(hive_data, dict):
+                _LOGGER.debug("Hive data not in expected format")
                 return None
             
-            # Try to get runtime_data from the entry (HA 2024.x+ approach)
-            for entry in hive_entries:
-                if hasattr(entry, "runtime_data") and entry.runtime_data:
-                    runtime_data = entry.runtime_data
-                    _LOGGER.debug("Found Hive runtime_data: %s", type(runtime_data))
+            # In modern Hive integration, data is stored as:
+            # hass.data["hive"][entry_id] = Hive object
+            # The Hive object has: session.auth.token
+            
+            for entry_id, hive_obj in hive_data.items():
+                _LOGGER.debug("Checking Hive entry: %s, type: %s", entry_id, type(hive_obj))
+                
+                # Try to access session.auth.token (apyhiveapi structure)
+                if hasattr(hive_obj, "session"):
+                    session = hive_obj.session
+                    _LOGGER.debug("Found session object: %s", type(session))
                     
-                    # Try to access session/auth from runtime_data
-                    if hasattr(runtime_data, "session"):
-                        session = runtime_data.session
-                        if hasattr(session, "auth") and hasattr(session.auth, "token"):
-                            token = session.auth.token
+                    if hasattr(session, "auth"):
+                        auth = session.auth
+                        _LOGGER.debug("Found auth object: %s", type(auth))
+                        
+                        # The auth object should have tokenData
+                        if hasattr(auth, "tokenData") and isinstance(auth.tokenData, dict):
+                            # Token is in tokenData["IdToken"]
+                            token = auth.tokenData.get("IdToken")
                             if token:
-                                _LOGGER.debug("Retrieved token from entry.runtime_data.session.auth.token")
+                                _LOGGER.info("Successfully retrieved Hive auth token from session.auth.tokenData")
                                 return token
-                    
-                    # Try direct auth access
-                    if hasattr(runtime_data, "auth") and hasattr(runtime_data.auth, "token"):
-                        token = runtime_data.auth.token
-                        if token:
-                            _LOGGER.debug("Retrieved token from entry.runtime_data.auth.token")
-                            return token
-                    
-                    # Try direct token access
-                    if hasattr(runtime_data, "token"):
-                        token = runtime_data.token
-                        if token:
-                            _LOGGER.debug("Retrieved token from entry.runtime_data.token")
-                            return token
+                        
+                        # Fallback: try direct token attribute
+                        if hasattr(auth, "token"):
+                            token = auth.token
+                            if token:
+                                _LOGGER.info("Successfully retrieved Hive auth token from session.auth.token")
+                                return token
             
-            # Fallback: try old method from hass.data
-            hive_data = hass.data.get("hive")
-            if hive_data:
-                if isinstance(hive_data, dict) and "session" in hive_data:
-                    hive_session = hive_data["session"]
-                    if hasattr(hive_session, "auth") and hasattr(hive_session.auth, "token"):
-                        token = hive_session.auth.token
-                        if token:
-                            _LOGGER.debug("Retrieved token from hass.data['hive']['session'].auth.token")
-                            return token
-                            
-            _LOGGER.debug("Could not find auth token in Hive data structure")
+            _LOGGER.warning("Hive integration loaded but could not find auth token")
             
-        except (KeyError, AttributeError) as err:
-            _LOGGER.debug("Error accessing Hive auth token: %s", err)
+        except (KeyError, AttributeError, TypeError) as err:
+            _LOGGER.error("Error accessing Hive auth token: %s", err, exc_info=True)
         
         return None
     
