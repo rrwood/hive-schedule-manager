@@ -315,8 +315,43 @@ class HiveScheduleAPI:
                 _LOGGER.debug("Error fetching from %s: %s", url, err)
                 continue
         
-        # If direct endpoints fail, fetch all devices and extract schedule for this node
-        _LOGGER.info("Direct endpoints failed, attempting to fetch from /devices endpoint")
+        # If direct endpoints fail, try fetching all heating nodes
+        _LOGGER.info("Direct endpoints failed, attempting to fetch from /heating endpoint")
+        try:
+            heating_url = f"{self.BASE_URL}/heating"
+            _LOGGER.info("Fetching all heating nodes from: %s", heating_url)
+            response = self.session.get(heating_url, timeout=30)
+            response.raise_for_status()
+            
+            data = response.json()
+            _LOGGER.info("Successfully received heating response")
+            
+            # Write to file for inspection
+            try:
+                import os
+                config_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                debug_file = os.path.join(config_dir, "hive_heating_debug.json")
+                
+                with open(debug_file, 'w') as f:
+                    json.dump(data, f, indent=2, default=str)
+                
+                _LOGGER.info("✓ Wrote heating response to: %s", debug_file)
+            except Exception as e:
+                _LOGGER.error("Could not write heating debug file: %s", e)
+            
+            # Try to find the node in the heating response
+            schedule = self._extract_schedule_from_devices(data, node_id)
+            if schedule:
+                _LOGGER.info("✓ Successfully extracted schedule for node %s from heating endpoint", node_id)
+                return schedule
+            else:
+                _LOGGER.warning("Could not find node %s in heating endpoint", node_id)
+            
+        except Exception as err:
+            _LOGGER.debug("Error fetching from /heating endpoint: %s", err)
+        
+        # Last resort: fetch all devices and extract schedule for this node
+        _LOGGER.info("Heating endpoint failed, attempting to fetch from /devices endpoint")
         try:
             devices_url = f"{self.BASE_URL}/devices"
             _LOGGER.info("Fetching devices from: %s", devices_url)
