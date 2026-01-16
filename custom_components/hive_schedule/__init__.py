@@ -288,31 +288,61 @@ class HiveScheduleAPI:
             # Inject our authentication token
             self._inject_our_token(hive_session)
             
-            # Use the Hive API's session to make the request
-            if hasattr(hive_session, 'api') and hasattr(hive_session.api, 'websession'):
+            # The apyhiveapi library has methods that handle authentication internally
+            # We need to use their heating module's methods
+            
+            if hasattr(hive_session, 'heating'):
+                heating_module = hive_session.heating
+                
+                # Try to find a method to update the schedule
+                # The apyhiveapi might have methods like set_schedule, update_schedule, etc.
+                _LOGGER.debug("Heating module methods: %s", [m for m in dir(heating_module) if not m.startswith('_')])
+                
+                # Look for schedule-related methods
+                for method_name in ['setSchedule', 'set_schedule', 'updateSchedule', 'update_schedule', 'put_schedule']:
+                    if hasattr(heating_module, method_name):
+                        method = getattr(heating_module, method_name)
+                        _LOGGER.info("Found method: %s", method_name)
+                        
+                        try:
+                            # Try calling with different parameter combinations
+                            result = await self.hass.async_add_executor_job(
+                                method, node_id, schedule_data
+                            )
+                            _LOGGER.info("✓ Successfully updated Hive schedule using %s", method_name)
+                            return True
+                        except Exception as e:
+                            _LOGGER.debug("Method %s failed: %s", method_name, e)
+                            continue
+            
+            # Fallback: Use the Hive API's low-level request method
+            if hasattr(hive_session, 'api') and hasattr(hive_session.api, 'request'):
                 api = hive_session.api
                 
-                our_token = self.auth.get_id_token()
-                url = f"https://beekeeper-uk.hivehome.com/1.0/nodes/heating/{node_id}"
+                _LOGGER.info("Attempting to use Hive's api.request method")
                 
-                headers = {
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                    "Authorization": our_token,
-                }
+                # The apyhiveapi's request method should handle auth internally
+                result = await self.hass.async_add_executor_job(
+                    api.request,
+                    'PUT',
+                    f'https://beekeeper-uk.hivehome.com/1.0/nodes/heating/{node_id}',
+                    schedule_data
+                )
                 
-                async with api.websession.put(url, json=schedule_data, headers=headers) as response:
-                    text = await response.text()
-                    
-                    if response.status == 200:
-                        _LOGGER.info("✓ Successfully updated Hive schedule for node %s", node_id)
-                        return True
-                    else:
-                        _LOGGER.error("Failed to update schedule: %d - %s", response.status, text[:500])
-                        return False
+                if result:
+                    _LOGGER.info("✓ Successfully updated Hive schedule")
+                    return True
+                else:
+                    _LOGGER.error("API request returned no result")
+                    return False
             
+            # Last resort: Check if there's a working authenticated session we can use
             _LOGGER.error("Could not find suitable API method in Hive integration")
-            _LOGGER.error("The Hive integration may not have been initialized properly")
+            _LOGGER.error("Available methods on hive_session: %s", [m for m in dir(hive_session) if not m.startswith('_')])
+            
+            if hasattr(hive_session, 'api'):
+                _LOGGER.error("Available methods on api: %s", [m for m in dir(hive_session.api) if not m.startswith('_')])
+            
             return False
             
         except HomeAssistantError as e:
@@ -523,6 +553,43 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
             raise HomeAssistantError("Token refresh failed")
     
     hass.services.async_register(DOMAIN, "refresh_token", handle_refresh_token)
+    
+    # Diagnostic service to explore Hive API
+    async def handle_diagnose_hive_api(call: ServiceCall) -> None:
+        """Diagnose what methods are available in the Hive integration."""
+        try:
+            hive_session = await hass.async_add_executor_job(api._get_hive_session)
+            
+            _LOGGER.warning("=" * 80)
+            _LOGGER.warning("HIVE API DIAGNOSTIC")
+            _LOGGER.warning("=" * 80)
+            
+            _LOGGER.warning("Hive session type: %s", type(hive_session).__name__)
+            _LOGGER.warning("Hive session attributes: %s", [a for a in dir(hive_session) if not a.startswith('_')][:20])
+            
+            if hasattr(hive_session, 'heating'):
+                _LOGGER.warning("")
+                _LOGGER.warning("Heating module found!")
+                _LOGGER.warning("Heating methods: %s", [m for m in dir(hive_session.heating) if not m.startswith('_')])
+            
+            if hasattr(hive_session, 'api'):
+                _LOGGER.warning("")
+                _LOGGER.warning("API module found!")
+                _LOGGER.warning("API methods: %s", [m for m in dir(hive_session.api) if not m.startswith('_')][:20])
+                
+                if hasattr(hive_session.api, 'request'):
+                    _LOGGER.warning("  → api.request method exists!")
+                if hasattr(hive_session.api, 'http'):
+                    _LOGGER.warning("  → api.http method exists!")
+            
+            _LOGGER.warning("=" * 80)
+            
+        except Exception as e:
+            _LOGGER.error("Diagnostic failed: %s", e)
+            import traceback
+            _LOGGER.error("Traceback: %s", traceback.format_exc())
+    
+    hass.services.async_register(DOMAIN, "diagnose_hive_api", handle_diagnose_hive_api)
     
     _LOGGER.info("✓ Hive Schedule Manager setup complete (Hybrid v2.1)")
     _LOGGER.info("This version uses the official Hive integration's API client with your own authentication")
