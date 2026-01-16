@@ -1,8 +1,8 @@
 """
 Hive Schedule Manager Integration for Home Assistant
 Enables programmatic control of British Gas Hive heating schedules.
-v4
-For documentation, visit: https://github.com/rrwood/hive-schedule-manager
+v5
+For documentation, visit: https://github.com/YOUR_USERNAME/hive-schedule-manager
 """
 from __future__ import annotations
 
@@ -161,78 +161,94 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     
     def get_hive_auth_token() -> str | None:
         """Extract auth token from existing Hive integration."""
-        if "hive" not in hass.data:
-            _LOGGER.warning("Hive integration not yet in hass.data")
-            _LOGGER.info("Available keys in hass.data: %s", list(hass.data.keys()))
-            return None
+        _LOGGER.info("=== SEARCHING FOR HIVE AUTH TOKEN ===")
         
-        try:
-            hive_data = hass.data.get("hive")
-            _LOGGER.info("=== HIVE DATA STRUCTURE DEBUG ===")
-            _LOGGER.info("hive_data type: %s", type(hive_data))
-            _LOGGER.info("hive_data is dict: %s", isinstance(hive_data, dict))
+        # Check 1: hass.data
+        _LOGGER.info("Available domains in hass.data: %s", [k for k in hass.data.keys() if not k.startswith("_")])
+        
+        if "hive" in hass.data:
+            _LOGGER.info("✓ Found 'hive' in hass.data")
+            hive_data = hass.data["hive"]
+            _LOGGER.info("  Type: %s", type(hive_data))
             
             if isinstance(hive_data, dict):
-                _LOGGER.info("hive_data keys: %s", list(hive_data.keys()))
+                _LOGGER.info("  Keys: %s", list(hive_data.keys()))
                 
                 for key, value in hive_data.items():
-                    _LOGGER.info("  Key: %s", key)
-                    _LOGGER.info("    Type: %s", type(value))
-                    _LOGGER.info("    Has __dict__: %s", hasattr(value, "__dict__"))
+                    _LOGGER.info("  Checking key: %s", key)
+                    _LOGGER.info("    Value type: %s", type(value))
                     
-                    if hasattr(value, "__dict__"):
-                        attrs = [a for a in dir(value) if not a.startswith("_")]
-                        _LOGGER.info("    Public attributes: %s", attrs[:10])  # First 10
-                    
-                    # Check for session
+                    # Try to get token
                     if hasattr(value, "session"):
-                        _LOGGER.info("    ✓ Has 'session' attribute")
                         session = value.session
-                        _LOGGER.info("      session type: %s", type(session))
-                        
-                        if hasattr(session, "__dict__"):
-                            sess_attrs = [a for a in dir(session) if not a.startswith("_")]
-                            _LOGGER.info("      session attributes: %s", sess_attrs[:10])
-                        
-                        # Check for auth
+                        _LOGGER.info("    Has session: %s", type(session))
                         if hasattr(session, "auth"):
-                            _LOGGER.info("      ✓ Has 'auth' attribute")
                             auth = session.auth
-                            _LOGGER.info("        auth type: %s", type(auth))
+                            _LOGGER.info("    Has auth: %s", type(auth))
                             
-                            if hasattr(auth, "__dict__"):
-                                auth_attrs = [a for a in dir(auth) if not a.startswith("_")]
-                                _LOGGER.info("        auth attributes: %s", auth_attrs)
-                            
-                            # Check all possible token locations
-                            if hasattr(auth, "tokenData"):
-                                _LOGGER.info("        ✓ Has 'tokenData'")
-                                token_data = auth.tokenData
-                                if isinstance(token_data, dict):
-                                    _LOGGER.info("          tokenData keys: %s", list(token_data.keys()))
-                                    if "IdToken" in token_data:
-                                        token = token_data["IdToken"]
-                                        _LOGGER.info("          ✓✓✓ FOUND TOKEN in tokenData['IdToken'] (length: %d)", len(token))
+                            # Try different token locations
+                            for attr in ["tokenData", "token", "accessToken", "_token"]:
+                                if hasattr(auth, attr):
+                                    token_val = getattr(auth, attr)
+                                    _LOGGER.info("    Has auth.%s: %s", attr, type(token_val))
+                                    
+                                    if isinstance(token_val, dict) and "IdToken" in token_val:
+                                        token = token_val["IdToken"]
+                                        _LOGGER.info("    ✓✓✓ FOUND TOKEN in auth.%s['IdToken']", attr)
                                         return token
-                            
-                            if hasattr(auth, "token"):
-                                token = auth.token
-                                _LOGGER.info("        ✓ Has 'token' attribute (value type: %s)", type(token))
-                                if token:
-                                    _LOGGER.info("          ✓✓✓ FOUND TOKEN in auth.token (length: %d)", len(str(token)))
-                                    return token
-                            
-                            if hasattr(auth, "accessToken"):
-                                token = auth.accessToken
-                                if token:
-                                    _LOGGER.info("        ✓✓✓ FOUND TOKEN in auth.accessToken")
-                                    return token
-            
-            _LOGGER.error("=== TOKEN NOT FOUND - Check debug output above ===")
-            
-        except Exception as err:
-            _LOGGER.error("Error accessing Hive auth token: %s", err, exc_info=True)
+                                    elif isinstance(token_val, str) and len(token_val) > 50:
+                                        _LOGGER.info("    ✓✓✓ FOUND TOKEN in auth.%s", attr)
+                                        return token
+        else:
+            _LOGGER.warning("✗ 'hive' NOT in hass.data")
         
+        # Check 2: Config entries runtime_data
+        _LOGGER.info("Checking config entries...")
+        hive_entries = hass.config_entries.async_entries("hive")
+        _LOGGER.info("Found %d Hive config entries", len(hive_entries))
+        
+        for entry in hive_entries:
+            _LOGGER.info("  Entry ID: %s", entry.entry_id)
+            _LOGGER.info("  Title: %s", entry.title)
+            _LOGGER.info("  Has runtime_data: %s", hasattr(entry, "runtime_data"))
+            
+            if hasattr(entry, "runtime_data") and entry.runtime_data:
+                runtime = entry.runtime_data
+                _LOGGER.info("    runtime_data type: %s", type(runtime))
+                
+                # Check for session in runtime_data
+                if hasattr(runtime, "session"):
+                    session = runtime.session
+                    _LOGGER.info("    Has session: %s", type(session))
+                    if hasattr(session, "auth"):
+                        auth = session.auth
+                        _LOGGER.info("    Has auth: %s", type(auth))
+                        
+                        for attr in ["tokenData", "token", "accessToken", "_token"]:
+                            if hasattr(auth, attr):
+                                token_val = getattr(auth, attr)
+                                _LOGGER.info("    Has auth.%s: %s", attr, type(token_val))
+                                
+                                if isinstance(token_val, dict) and "IdToken" in token_val:
+                                    token = token_val["IdToken"]
+                                    _LOGGER.info("    ✓✓✓ FOUND TOKEN in runtime auth.%s['IdToken']", attr)
+                                    return token
+                                elif isinstance(token_val, str) and len(token_val) > 50:
+                                    _LOGGER.info("    ✓✓✓ FOUND TOKEN in runtime auth.%s", attr)
+                                    return token
+                
+                # Check runtime_data attributes
+                runtime_attrs = [a for a in dir(runtime) if not a.startswith("_")]
+                _LOGGER.info("    runtime_data attributes: %s", runtime_attrs[:20])
+        
+        # Check 3: Look in entity registry for coordinator
+        _LOGGER.info("Checking climate.heating entity...")
+        climate_entity = hass.states.get("climate.heating")
+        if climate_entity:
+            _LOGGER.info("  climate.heating found")
+            _LOGGER.info("  Attributes: %s", list(climate_entity.attributes.keys()))
+        
+        _LOGGER.error("=== TOKEN NOT FOUND ANYWHERE ===")
         return None
     
     # Initialize API
