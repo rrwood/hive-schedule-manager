@@ -156,7 +156,7 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     
     _LOGGER.info("Setting up Hive Schedule Manager")
     
-    # Get scan interval first
+    # Get scan interval first (before any other variables)
     scan_interval = config.get(DOMAIN, {}).get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
     
     def get_hive_auth_token() -> str | None:
