@@ -1,8 +1,8 @@
 """
-Hive Schedule Manager Integration for Home Assistant (Standalone Version)
-Handles its own authentication with Hive API independently.
+Hive Schedule Manager Integration for Home Assistant (Hybrid Version)
+Uses own authentication but leverages Hive integration's API client for schedule updates.
 
-Version: 2.0.0 (Standalone)
+Version: 2.1.0 (Hybrid)
 """
 from __future__ import annotations
 
@@ -10,16 +10,10 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 import json
-import traceback
 
 import voluptuous as vol
-import requests
-from botocore.auth import SigV4Auth
-from botocore.awsrequest import AWSRequest
-from botocore.session import Session as BotoSession
 from pycognito import Cognito
 from pycognito.exceptions import SMSMFAChallengeException
-from botocore.exceptions import ClientError
 
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import config_validation as cv
@@ -49,7 +43,7 @@ ATTR_DAY = "day"
 ATTR_SCHEDULE = "schedule"
 ATTR_IS_WORKDAY = "is_workday"
 ATTR_WAKE_TIME = "wake_time"
-ATTR_MFA_CODE = "code"
+ATTR_MFA_CODE = "mfa_code"
 
 # Configuration schema
 CONFIG_SCHEMA = vol.Schema(
@@ -63,7 +57,7 @@ CONFIG_SCHEMA = vol.Schema(
     extra=vol.ALLOW_EXTRA,
 )
 
-# Service schemas
+# Service schemas  
 SET_SCHEDULE_SCHEMA = vol.Schema({
     vol.Required(ATTR_NODE_ID): cv.string,
     vol.Required(ATTR_SCHEDULE): vol.Schema({
@@ -98,7 +92,7 @@ MFA_SCHEMA = vol.Schema({
 
 
 class HiveAuth:
-    """Handle Hive authentication via AWS Cognito."""
+    """Handle Hive authentication via AWS Cognito with MFA support."""
     
     def __init__(self, username: str, password: str) -> None:
         """Initialize Hive authentication."""
@@ -107,12 +101,13 @@ class HiveAuth:
         self._cognito = None
         self._id_token = None
         self._access_token = None
+        self._refresh_token = None
         self._token_expiry = None
         self._mfa_required = False
         self._mfa_session = None
         self._mfa_session_token = None
     
-    def authenticate(self, mfa_code: str | None = None) -> bool:
+    def authenticate(self) -> bool:
         """Authenticate with Hive via AWS Cognito."""
         try:
             _LOGGER.debug("Authenticating with Hive API...")
@@ -124,83 +119,52 @@ class HiveAuth:
                 username=self.username
             )
             
-            if mfa_code:
-                return self.verify_mfa(mfa_code)
-            
             try:
                 self._cognito.authenticate(password=self.password)
-            except SMSMFAChallengeException as mfa_error:
-                _LOGGER.debug("SMSMFAChallengeException caught during authentication")
+                
+                self._id_token = self._cognito.id_token
+                self._access_token = self._cognito.access_token
+                self._refresh_token = self._cognito.refresh_token
+                self._token_expiry = datetime.now() + timedelta(minutes=55)
+                
+                _LOGGER.info("✓ Successfully authenticated with Hive (token expires in ~55 minutes)")
+                return True
+                
+            except SMSMFAChallengeException as mfa_ex:
+                _LOGGER.warning("MFA code required for authentication")
+                _LOGGER.info("Please call the 'hive_schedule.verify_mfa_code' service with your MFA code")
+                
                 self._mfa_required = True
                 self._mfa_session = self._cognito
+                self._mfa_session_token = mfa_ex.get_session()
                 
-                if len(mfa_error.args) > 1 and isinstance(mfa_error.args[1], dict):
-                    challenge_params = mfa_error.args[1]
-                    self._mfa_session_token = challenge_params.get('Session')
-                
-                _LOGGER.info("MFA required - SMS code has been sent to your registered phone")
                 return False
-            except ClientError as auth_error:
-                error_code = auth_error.response.get("Error", {}).get("Code", "")
-                error_message = str(auth_error)
-                
-                if error_code in ["UserMFATypeNotFound", "SMS_MFA", "SOFTWARE_TOKEN_MFA"] or "mfa" in error_message.lower():
-                    self._mfa_required = True
-                    self._mfa_session = self._cognito
-                    _LOGGER.info("MFA required - SMS code has been sent to your registered phone")
-                    return False
-                
-                raise
-            
-            self._id_token = self._cognito.id_token
-            self._access_token = self._cognito.access_token
-            self._token_expiry = datetime.now() + timedelta(minutes=55)
-            self._mfa_required = False
-            
-            _LOGGER.info("✓ Successfully authenticated with Hive (token expires in ~55 minutes)")
-            return True
             
         except Exception as e:
             _LOGGER.error("Failed to authenticate with Hive: %s", e)
             return False
     
-    def verify_mfa(self, mfa_code: str) -> bool:
+    def verify_mfa_code(self, mfa_code: str) -> bool:
         """Verify MFA code and complete authentication."""
+        if not self._mfa_required or not self._mfa_session:
+            _LOGGER.error("No MFA session available - authenticate first")
+            return False
+        
         try:
-            if not self._mfa_session or not self._mfa_required:
-                _LOGGER.error("No active MFA session - cannot verify code")
-                return False
+            _LOGGER.info("Verifying MFA code...")
             
-            _LOGGER.debug("Verifying MFA code...")
+            self._mfa_session.respond_to_sms_mfa_challenge(
+                mfa_code,
+                self._mfa_session_token
+            )
             
-            if hasattr(self._mfa_session, 'client'):
-                client = self._mfa_session.client
-                
-                challenge_responses = {
-                    "USERNAME": str(self.username),
-                    "SMS_MFA_CODE": str(mfa_code)
-                }
-                
-                response = client.respond_to_auth_challenge(
-                    ClientId=COGNITO_CLIENT_ID,
-                    ChallengeName="SMS_MFA",
-                    Session=self._mfa_session_token,
-                    ChallengeResponses=challenge_responses
-                )
-                
-                auth_result = response.get("AuthenticationResult", {})
-                if auth_result:
-                    self._mfa_session.id_token = auth_result.get("IdToken")
-                    self._mfa_session.access_token = auth_result.get("AccessToken")
-                else:
-                    _LOGGER.error("No AuthenticationResult in response")
-                    return False
-            else:
-                _LOGGER.error("Cannot access boto3 client from cognito session")
+            if not self._mfa_session.id_token:
+                _LOGGER.error("MFA verification failed - no tokens received")
                 return False
             
             self._id_token = self._mfa_session.id_token
             self._access_token = self._mfa_session.access_token
+            self._refresh_token = self._mfa_session.refresh_token
             self._token_expiry = datetime.now() + timedelta(minutes=55)
             self._mfa_required = False
             self._mfa_session = None
@@ -224,7 +188,7 @@ class HiveAuth:
             return self.authenticate()
         
         try:
-            if self._cognito:
+            if self._cognito and self._refresh_token:
                 _LOGGER.debug("Refreshing token...")
                 self._cognito.renew_access_token()
                 self._id_token = self._cognito.id_token
@@ -252,22 +216,12 @@ class HiveAuth:
 
 
 class HiveScheduleAPI:
-    """API client for Hive Schedule operations."""
+    """API client for Hive Schedule operations using Hive integration's client."""
     
-    BASE_URL = "https://beekeeper-uk.hivehome.com/1.0"
-    AWS_REGION = "eu-west-1"
-    AWS_SERVICE = "execute-api"
-    
-    def __init__(self, auth: HiveAuth) -> None:
+    def __init__(self, hass: HomeAssistant, auth: HiveAuth) -> None:
         """Initialize the API client."""
+        self.hass = hass
         self.auth = auth
-        self.session = requests.Session()
-        self.session.headers.update({
-            "Content-Type": "application/json",
-            "Accept": "*/*",
-            "Origin": "https://my.hivehome.com",
-            "Referer": "https://my.hivehome.com/"
-        })
     
     @staticmethod
     def time_to_minutes(time_str: str) -> int:
@@ -283,95 +237,101 @@ class HiveScheduleAPI:
             "start": HiveScheduleAPI.time_to_minutes(time_str)
         }
     
-    def _sign_request(self, method: str, url: str, data: dict[str, Any] | None = None) -> dict[str, str]:
-        """Sign a request with AWS SigV4."""
+    def _get_hive_session(self):
+        """Get the Hive API session from the official integration."""
+        hive_entries = self.hass.config_entries.async_entries("hive")
+        
+        if not hive_entries:
+            raise HomeAssistantError("Hive integration not installed or not configured")
+        
+        for entry in hive_entries:
+            if hasattr(entry, 'runtime_data') and entry.runtime_data:
+                return entry.runtime_data
+        
+        raise HomeAssistantError("Hive integration not loaded")
+    
+    def _inject_our_token(self, hive_session) -> bool:
+        """Inject our authentication token into the Hive session."""
         try:
-            access_key = self.auth.get_access_token()
-            if not access_key:
-                _LOGGER.error("Cannot sign request: No access token available")
-                return {}
+            our_token = self.auth.get_id_token()
             
-            # Create a boto session with credentials from Cognito
-            # Note: This is a simplified approach - we're using the access token as a credential
-            boto_session = BotoSession()
+            if not our_token:
+                _LOGGER.error("No authentication token available")
+                return False
             
-            # Prepare the request for signing
-            request_body = json.dumps(data) if data else ""
+            # Update the Hive session's auth with our token
+            if hasattr(hive_session, 'auth'):
+                _LOGGER.debug("Injecting our auth token into Hive session")
+                
+                # Try to update various token storage locations
+                if hasattr(hive_session.auth, 'access_token'):
+                    hive_session.auth.access_token = our_token
+                if hasattr(hive_session.auth, 'id_token'):
+                    hive_session.auth.id_token = our_token
+                if hasattr(hive_session.auth, '_id_token'):
+                    hive_session.auth._id_token = our_token
+                
+                return True
             
-            request = AWSRequest(
-                method=method,
-                url=url,
-                data=request_body,
-                headers=dict(self.session.headers)
-            )
-            
-            # Get credentials from the Cognito token
-            credentials = boto_session.get_credentials()
-            
-            # Sign the request
-            SigV4Auth(credentials, self.AWS_SERVICE, self.AWS_REGION).add_auth(request)
-            
-            return dict(request.headers)
+            return False
             
         except Exception as e:
-            _LOGGER.warning("Could not sign request with AWS SigV4: %s", e)
-            return dict(self.session.headers)
-    
-    def update_schedule(self, node_id: str, schedule_data: dict[str, Any]) -> bool:
-        """Update the heating schedule for a node."""
-        id_token = self.auth.get_id_token()
-        
-        if not id_token:
-            _LOGGER.error("Cannot update schedule: No auth token available")
+            _LOGGER.warning("Could not inject token: %s", e)
             return False
-        
-        # Use ID token as Authorization header for now (simpler approach)
-        headers = dict(self.session.headers)
-        headers["Authorization"] = id_token
-        
-        endpoints_to_try = [
-            f"{self.BASE_URL}/nodes/heating/{node_id}",
-            f"{self.BASE_URL}/heating/{node_id}",
-            f"{self.BASE_URL}/schedules/{node_id}",
-        ]
-        
-        for url in endpoints_to_try:
-            try:
-                _LOGGER.info("Attempting to update schedule at: %s", url)
-                _LOGGER.debug("Payload: %s", json.dumps(schedule_data, indent=2, default=str))
+    
+    async def update_schedule(self, node_id: str, schedule_data: dict[str, Any]) -> bool:
+        """Update the heating schedule using Hive integration's API."""
+        try:
+            # Get the Hive session
+            hive_session = await self.hass.async_add_executor_job(self._get_hive_session)
+            
+            # Inject our authentication token
+            self._inject_our_token(hive_session)
+            
+            # Use the Hive API's session to make the request
+            if hasattr(hive_session, 'api') and hasattr(hive_session.api, 'websession'):
+                api = hive_session.api
                 
-                response = requests.put(url, json=schedule_data, headers=headers, timeout=30)
+                our_token = self.auth.get_id_token()
+                url = f"https://beekeeper-uk.hivehome.com/1.0/nodes/heating/{node_id}"
                 
-                _LOGGER.info("Response status from %s: %d", url, response.status_code)
-                _LOGGER.debug("Response headers: %s", dict(response.headers))
+                headers = {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "Authorization": our_token,
+                }
                 
-                if response.text:
-                    _LOGGER.debug("Response body: %s", response.text[:500])
-                
-                if response.status_code == 403:
-                    _LOGGER.warning("Access forbidden (403)")
-                    continue
-                
-                if response.status_code == 404:
-                    _LOGGER.debug("Not found (404) - trying next endpoint")
-                    continue
-                
-                response.raise_for_status()
-                _LOGGER.info("✓ Successfully updated schedule at %s", url)
-                return True
-                
-            except Exception as err:
-                _LOGGER.debug("Error updating schedule at %s: %s", url, err)
-                continue
-        
-        _LOGGER.error("Could not update schedule at any endpoint for node %s", node_id)
-        return False
+                async with api.websession.put(url, json=schedule_data, headers=headers) as response:
+                    text = await response.text()
+                    
+                    if response.status == 200:
+                        _LOGGER.info("✓ Successfully updated Hive schedule for node %s", node_id)
+                        return True
+                    else:
+                        _LOGGER.error("Failed to update schedule: %d - %s", response.status, text[:500])
+                        return False
+            
+            _LOGGER.error("Could not find suitable API method in Hive integration")
+            _LOGGER.error("The Hive integration may not have been initialized properly")
+            return False
+            
+        except HomeAssistantError as e:
+            _LOGGER.error("%s", str(e))
+            _LOGGER.error("Please ensure the Hive integration is installed and configured")
+            return False
+        except Exception as e:
+            _LOGGER.error("Error updating schedule: %s", e)
+            import traceback
+            _LOGGER.debug("Traceback: %s", traceback.format_exc())
+            return False
+
 
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     """Set up the Hive Schedule Manager component."""
     
-    _LOGGER.info("Setting up Hive Schedule Manager (Standalone v2.0)")
+    _LOGGER.info("Setting up Hive Schedule Manager (Hybrid v2.1)")
     
+    # Get configuration
     conf = config.get(DOMAIN, {})
     username = conf.get(CONF_USERNAME)
     password = conf.get(CONF_PASSWORD)
@@ -381,56 +341,47 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         _LOGGER.error("Hive username and password are required in configuration.yaml")
         return False
     
-    auth = HiveAuth(username, password)
-    api = HiveScheduleAPI(auth)
+    # Check if Hive integration is available
+    hive_entries = hass.config_entries.async_entries("hive")
+    if not hive_entries:
+        _LOGGER.error("Hive integration not found - it MUST be installed for this hybrid version to work!")
+        _LOGGER.error("Please install the official Hive integration first")
+        return False
     
+    # Initialize authentication and API
+    auth = HiveAuth(username, password)
+    api = HiveScheduleAPI(hass, auth)
+    
+    # Store in hass.data
     hass.data[DOMAIN] = {
         "auth": auth,
         "api": api
     }
     
+    # Initial authentication
     def initial_auth():
         """Perform initial authentication."""
         if not auth.authenticate():
             if auth.is_mfa_required():
-                _LOGGER.warning("MFA required - waiting for user to provide SMS code via verify_mfa_code service")
+                _LOGGER.warning("MFA code required - call hive_schedule.verify_mfa_code service")
+                return True  # Don't fail setup, just wait for MFA
+            else:
+                _LOGGER.error("Initial authentication failed - check your Hive username and password")
                 return False
-            _LOGGER.error("Initial authentication failed - check your Hive username and password")
-            return False
         return True
     
     if not await hass.async_add_executor_job(initial_auth):
-        if not auth.is_mfa_required():
-            _LOGGER.warning("Failed to authenticate on startup - will retry")
+        _LOGGER.warning("Failed to authenticate on startup - will retry")
     
+    # Set up periodic token refresh
     async def refresh_token_periodic(now=None):
         """Periodically refresh the authentication token."""
-        await hass.async_add_executor_job(auth.refresh_token)
+        if not auth.is_mfa_required():
+            await hass.async_add_executor_job(auth.refresh_token)
     
     async_track_time_interval(hass, refresh_token_periodic, scan_interval)
     
-    async def handle_verify_mfa(call: ServiceCall) -> None:
-        """Handle MFA code verification."""
-        mfa_code = call.data.get(ATTR_MFA_CODE)
-        if not mfa_code:
-            _LOGGER.error("MFA code not provided")
-            return
-        
-        _LOGGER.info("Verifying MFA code...")
-        success = await hass.async_add_executor_job(auth.verify_mfa, mfa_code)
-        
-        if success:
-            _LOGGER.info("✓ MFA verified successfully - integration setup complete")
-        else:
-            _LOGGER.error("✗ MFA verification failed - invalid code")
-    
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_VERIFY_MFA,
-        handle_verify_mfa,
-        schema=MFA_SCHEMA
-    )
-    
+    # Service handlers
     async def handle_set_schedule(call: ServiceCall) -> None:
         """Handle set_heating_schedule service call."""
         node_id = call.data[ATTR_NODE_ID]
@@ -438,6 +389,7 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         
         _LOGGER.info("Setting complete schedule for node %s", node_id)
         
+        # Build schedule in Hive format
         schedule_data: dict[str, Any] = {"schedule": {}}
         
         for day in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
@@ -453,7 +405,9 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
                     HiveScheduleAPI.build_schedule_entry("00:00", 16.0)
                 ]
         
-        await hass.async_add_executor_job(api.update_schedule, node_id, schedule_data)
+        success = await api.update_schedule(node_id, schedule_data)
+        if not success:
+            raise HomeAssistantError("Failed to update schedule")
     
     async def handle_set_day(call: ServiceCall) -> None:
         """Handle set_day_schedule service call."""
@@ -462,17 +416,15 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         day_schedule = call.data[ATTR_SCHEDULE]
         
         _LOGGER.info("Setting schedule for %s on node %s", day, node_id)
-        _LOGGER.debug("New schedule for %s: %s", day, day_schedule)
         
-        # For set_day_schedule, we'll create a complete week with the new day
-        # and default schedules for other days
-        schedule_data: dict[str, Any] = {"schedule": {}}
-        
+        # Default schedule for other days
         default_schedule = [
             HiveScheduleAPI.build_schedule_entry("00:00", 16.0),
             HiveScheduleAPI.build_schedule_entry("08:00", 18.0),
             HiveScheduleAPI.build_schedule_entry("22:00", 16.0)
         ]
+        
+        schedule_data: dict[str, Any] = {"schedule": {}}
         
         for d in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
             if d == day:
@@ -480,18 +432,13 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
                     HiveScheduleAPI.build_schedule_entry(entry["time"], entry["temp"])
                     for entry in day_schedule
                 ]
-                _LOGGER.info("Updated %s with new schedule: %s", d, json.dumps(schedule_data["schedule"][d], indent=2))
             else:
-                # Use default schedule for other days
                 schedule_data["schedule"][d] = default_schedule
-                _LOGGER.info("Set %s to default schedule", d)
         
-        _LOGGER.info("Complete schedule to send: %s", json.dumps(schedule_data, indent=2, default=str))
-        success = await hass.async_add_executor_job(api.update_schedule, node_id, schedule_data)
-        
+        success = await api.update_schedule(node_id, schedule_data)
         if not success:
             raise HomeAssistantError(f"Failed to update schedule for {day}")
-
+    
     async def handle_calendar_update(call: ServiceCall) -> None:
         """Handle update_from_calendar service call."""
         node_id = call.data[ATTR_NODE_ID]
@@ -529,6 +476,20 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
             )
         )
     
+    async def handle_verify_mfa(call: ServiceCall) -> None:
+        """Handle MFA code verification."""
+        mfa_code = call.data[ATTR_MFA_CODE]
+        
+        _LOGGER.info("MFA verification requested")
+        
+        success = await hass.async_add_executor_job(auth.verify_mfa_code, mfa_code)
+        
+        if success:
+            _LOGGER.info("✓ MFA verification successful - you can now use the schedule services")
+        else:
+            raise HomeAssistantError("MFA verification failed - check your code and try again")
+    
+    # Register services
     hass.services.async_register(
         DOMAIN, SERVICE_SET_SCHEDULE, handle_set_schedule, schema=SET_SCHEDULE_SCHEMA
     )
@@ -541,16 +502,28 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         DOMAIN, SERVICE_UPDATE_FROM_CALENDAR, handle_calendar_update, schema=CALENDAR_SCHEMA
     )
     
+    hass.services.async_register(
+        DOMAIN, SERVICE_VERIFY_MFA, handle_verify_mfa, schema=MFA_SCHEMA
+    )
+    
+    # Manual refresh service
     async def handle_refresh_token(call: ServiceCall) -> None:
         """Manually refresh the Hive authentication token."""
         _LOGGER.info("Manual token refresh requested")
+        
+        if auth.is_mfa_required():
+            _LOGGER.warning("Cannot refresh - MFA code required first")
+            raise HomeAssistantError("MFA verification required - call verify_mfa_code service first")
+        
         success = await hass.async_add_executor_job(auth.refresh_token)
         if success:
             _LOGGER.info("✓ Token refresh successful")
         else:
             _LOGGER.error("✗ Token refresh failed")
+            raise HomeAssistantError("Token refresh failed")
     
     hass.services.async_register(DOMAIN, "refresh_token", handle_refresh_token)
     
-    _LOGGER.info("✓ Hive Schedule Manager setup complete (Standalone v2.0)")
+    _LOGGER.info("✓ Hive Schedule Manager setup complete (Hybrid v2.1)")
+    _LOGGER.info("This version uses the official Hive integration's API client with your own authentication")
     return True
