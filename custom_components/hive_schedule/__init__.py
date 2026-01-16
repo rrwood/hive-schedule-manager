@@ -568,6 +568,67 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     
     hass.services.async_register(DOMAIN, "debug_hive_data", handle_debug_hive)
     
+    # Service to find node IDs
+    async def handle_find_nodes(call: ServiceCall) -> None:
+        """Find all Hive heating node IDs."""
+        _LOGGER.warning("=" * 80)
+        _LOGGER.warning("SEARCHING FOR HIVE HEATING NODE IDS")
+        _LOGGER.warning("=" * 80)
+        
+        hive_entries = hass.config_entries.async_entries("hive")
+        
+        for entry in hive_entries:
+            if hasattr(entry, 'runtime_data') and entry.runtime_data:
+                runtime = entry.runtime_data
+                
+                # Check devices dict
+                if hasattr(runtime, 'devices'):
+                    devices = runtime.devices
+                    _LOGGER.warning("Found %d devices in Hive integration:", len(devices))
+                    
+                    for device_id, device_data in devices.items():
+                        _LOGGER.warning("")
+                        _LOGGER.warning("Device ID: %s", device_id)
+                        _LOGGER.warning("  Type: %s", type(device_data).__name__)
+                        
+                        if isinstance(device_data, dict):
+                            _LOGGER.warning("  Keys: %s", list(device_data.keys())[:20])
+                            
+                            # Look for heating/climate related data
+                            for key, value in device_data.items():
+                                if 'heating' in str(key).lower() or 'climate' in str(key).lower() or 'thermostat' in str(key).lower():
+                                    _LOGGER.warning("    %s: %s", key, value)
+                                if key in ['type', 'model', 'name', 'deviceType']:
+                                    _LOGGER.warning("    %s: %s", key, value)
+                        
+                        # The device_id itself might be the node_id
+                        if len(device_id) > 20:  # UUIDs are typically 36 chars
+                            _LOGGER.warning("  ★ This might be your node_id: %s", device_id)
+                
+                # Check deviceList
+                if hasattr(runtime, 'deviceList'):
+                    device_list = runtime.deviceList
+                    _LOGGER.warning("")
+                    _LOGGER.warning("Found %d devices in deviceList:", len(device_list))
+                    
+                    for device_id, device_info in device_list.items():
+                        _LOGGER.warning("")
+                        _LOGGER.warning("Device: %s", device_id)
+                        if isinstance(device_info, dict):
+                            device_type = device_info.get('type', 'unknown')
+                            device_name = device_info.get('state', {}).get('name', 'unknown')
+                            _LOGGER.warning("  Name: %s", device_name)
+                            _LOGGER.warning("  Type: %s", device_type)
+                            
+                            if 'heating' in device_type.lower() or 'thermostat' in device_type.lower():
+                                _LOGGER.warning("  ★★★ HEATING DEVICE FOUND ★★★")
+                                _LOGGER.warning("  ★★★ Use this node_id: %s", device_id)
+        
+        _LOGGER.warning("")
+        _LOGGER.warning("=" * 80)
+    
+    hass.services.async_register(DOMAIN, "find_node_ids", handle_find_nodes)
+    
     # Register simple diagnostic service
     async def handle_simple_diagnose(call: ServiceCall) -> None:
         """Handle simple diagnostic service call."""
