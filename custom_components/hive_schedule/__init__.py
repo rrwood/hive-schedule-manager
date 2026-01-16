@@ -134,9 +134,13 @@ class HiveAuth:
                 # Store the MFA session for later use
                 self._mfa_required = True
                 self._mfa_session = self._cognito
-                # Extract session token from the exception
-                if hasattr(mfa_error, 'get_param'):
-                    self._mfa_session_token = mfa_error.get_param('Session')
+                
+                # Extract session token from the exception - it's in args[1]['Session']
+                if len(mfa_error.args) > 1 and isinstance(mfa_error.args[1], dict):
+                    challenge_params = mfa_error.args[1]
+                    self._mfa_session_token = challenge_params.get('Session')
+                    _LOGGER.debug("Extracted session token from MFA exception")
+                    _LOGGER.debug("Session token (first 50 chars): %s", str(self._mfa_session_token)[:50] if self._mfa_session_token else "None")
                 
                 _LOGGER.info("MFA required - SMS code has been sent to your registered phone")
                 return False
@@ -193,32 +197,57 @@ class HiveAuth:
                 return False
             
             _LOGGER.debug("Verifying MFA code...")
+            _LOGGER.debug("MFA Session token available: %s", bool(self._mfa_session_token))
             
             # Use the stored cognito session to respond to the challenge
             try:
                 # Try to answer the SMS MFA challenge
                 _LOGGER.debug("Attempting to answer SMS MFA challenge...")
                 
-                # Method 1: Direct client call
+                # Method 1: Direct client call with proper parameters
                 if hasattr(self._mfa_session, 'client'):
                     client = self._mfa_session.client
+                    
+                    _LOGGER.debug("Calling respond_to_auth_challenge with ClientId=%s, ChallengeName=SMS_MFA", COGNITO_CLIENT_ID)
+                    
+                    # Build challenge responses - ensure all values are strings
+                    challenge_responses = {
+                        "USERNAME": str(self.username),
+                        "SMS_MFA_CODE": str(mfa_code)
+                    }
+                    
+                    _LOGGER.debug("Challenge responses: USERNAME=%s, SMS_MFA_CODE=%s", self.username, mfa_code)
+                    
                     response = client.respond_to_auth_challenge(
                         ClientId=COGNITO_CLIENT_ID,
                         ChallengeName="SMS_MFA",
                         Session=self._mfa_session_token,
-                        ChallengeResponses={
-                            "USERNAME": self.username,
-                            "SMS_MFA_CODE": mfa_code
-                        }
+                        ChallengeResponses=challenge_responses
                     )
-                    self._mfa_session.id_token = response.get("AuthenticationResult", {}).get("IdToken")
-                    self._mfa_session.access_token = response.get("AuthenticationResult", {}).get("AccessToken")
+                    
+                    _LOGGER.debug("Auth challenge response status: %s", response.get("ResponseMetadata", {}).get("HTTPStatusCode"))
+                    
+                    # Extract tokens from response
+                    auth_result = response.get("AuthenticationResult", {})
+                    if auth_result:
+                        self._mfa_session.id_token = auth_result.get("IdToken")
+                        self._mfa_session.access_token = auth_result.get("AccessToken")
+                        _LOGGER.debug("Successfully extracted tokens from response")
+                    else:
+                        _LOGGER.error("No AuthenticationResult in response")
+                        _LOGGER.debug("Full response keys: %s", response.keys())
+                        return False
                 else:
                     _LOGGER.error("Cannot access boto3 client from cognito session")
                     return False
             
+            except TypeError as type_err:
+                _LOGGER.error("Type error - likely parameter validation issue: %s", type_err)
+                _LOGGER.debug("Type error details: %s", str(type_err))
+                return False
             except Exception as e:
                 _LOGGER.error("Failed to answer MFA challenge: %s", e)
+                _LOGGER.debug("Exception type: %s, Full error: %s", type(e).__name__, str(e))
                 return False
             
             self._id_token = self._mfa_session.id_token
