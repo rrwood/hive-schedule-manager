@@ -343,67 +343,88 @@ class HiveScheduleAPI:
     def _extract_schedule_from_devices(self, devices_data: dict[str, Any], node_id: str) -> dict[str, Any] | None:
         """Extract schedule for a specific node from the devices response."""
         try:
-            # Log the full structure for debugging
-            _LOGGER.debug("Devices response keys: %s", list(devices_data.keys()))
-            _LOGGER.debug("Full devices response: %s", json.dumps(devices_data, indent=2, default=str)[:2000])
+            # Log the FULL structure for debugging
+            _LOGGER.info("=== DEVICES RESPONSE DEBUG ===")
+            _LOGGER.info("Response type: %s", type(devices_data).__name__)
+            _LOGGER.info("Response keys: %s", list(devices_data.keys()) if isinstance(devices_data, dict) else "N/A (not a dict)")
+            _LOGGER.info("Full response:\n%s", json.dumps(devices_data, indent=2, default=str))
+            _LOGGER.info("=== END DEVICES RESPONSE ===")
             
             # Try various possible structures
             # Structure 1: devices -> direct list
             if isinstance(devices_data, list):
+                _LOGGER.debug("Checking structure 1: direct list")
                 for device in devices_data:
                     if device.get("id") == node_id and "schedule" in device:
+                        _LOGGER.info("Found schedule in list item")
                         return device.get("schedule")
             
             # Structure 2: devices -> nested object
             if "devices" in devices_data:
+                _LOGGER.debug("Checking structure 2: devices key")
                 devices_list = devices_data.get("devices", [])
                 if isinstance(devices_list, list):
                     for device in devices_list:
                         if device.get("id") == node_id and "schedule" in device:
+                            _LOGGER.info("Found schedule in devices list")
                             return device.get("schedule")
                 elif isinstance(devices_list, dict):
                     device = devices_list.get(node_id)
                     if device and "schedule" in device:
+                        _LOGGER.info("Found schedule in devices dict")
                         return device.get("schedule")
             
             # Structure 3: nodes -> direct list
             if "nodes" in devices_data:
+                _LOGGER.debug("Checking structure 3: nodes key")
                 nodes_list = devices_data.get("nodes", [])
                 if isinstance(nodes_list, list):
                     for node in nodes_list:
                         if node.get("id") == node_id and "schedule" in node:
+                            _LOGGER.info("Found schedule in nodes list")
                             return node.get("schedule")
                 elif isinstance(nodes_list, dict):
                     node = nodes_list.get(node_id)
                     if node and "schedule" in node:
+                        _LOGGER.info("Found schedule in nodes dict")
                         return node.get("schedule")
             
             # Structure 4: heating -> nested
             if "heating" in devices_data:
+                _LOGGER.debug("Checking structure 4: heating key")
                 heating = devices_data.get("heating", {})
                 if isinstance(heating, dict):
-                    # Try as direct dict
                     if "schedule" in heating:
+                        _LOGGER.info("Found schedule directly in heating")
                         return heating.get("schedule")
-                    # Try finding node in heating
                     if node_id in heating:
                         node = heating.get(node_id, {})
                         if "schedule" in node:
+                            _LOGGER.info("Found schedule in heating[node_id]")
                             return node.get("schedule")
             
             # Structure 5: Walk through entire structure looking for node_id
-            def find_schedule(obj, target_id):
+            _LOGGER.debug("Checking structure 5: recursive search for node_id")
+            def find_schedule(obj, target_id, depth=0):
                 """Recursively search for target node and its schedule."""
+                if depth > 10:  # Prevent infinite recursion
+                    return None
+                    
                 if isinstance(obj, dict):
-                    if obj.get("id") == target_id and "schedule" in obj:
-                        return obj.get("schedule")
-                    for value in obj.values():
-                        result = find_schedule(value, target_id)
+                    if obj.get("id") == target_id:
+                        _LOGGER.debug("Found node with id=%s at depth %d", target_id, depth)
+                        _LOGGER.debug("Node content: %s", json.dumps(obj, indent=2, default=str)[:500])
+                        if "schedule" in obj:
+                            _LOGGER.info("Found schedule in node dict")
+                            return obj.get("schedule")
+                    
+                    for key, value in obj.items():
+                        result = find_schedule(value, target_id, depth + 1)
                         if result:
                             return result
                 elif isinstance(obj, list):
                     for item in obj:
-                        result = find_schedule(item, target_id)
+                        result = find_schedule(item, target_id, depth + 1)
                         if result:
                             return result
                 return None
@@ -412,11 +433,13 @@ class HiveScheduleAPI:
             if schedule:
                 return schedule
             
-            _LOGGER.warning("Could not find schedule for node %s in devices response", node_id)
+            _LOGGER.error("Could not find schedule for node %s in devices response", node_id)
+            _LOGGER.error("Looking for node_id: %s", node_id)
             return None
             
         except Exception as err:
             _LOGGER.error("Error extracting schedule from devices: %s", err)
+            _LOGGER.exception("Full exception:")
             return None
 
     def get_all_devices(self) -> dict[str, Any] | None:
