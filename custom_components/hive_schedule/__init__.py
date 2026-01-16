@@ -1,31 +1,35 @@
 """
-Hive Schedule Manager Integration for Home Assistant
-Enables programmatic control of British Gas Hive heating schedules.
+Hive Schedule Manager Integration for Home Assistant (Standalone Version)
+Handles its own authentication with Hive API independently.
 
-Artifact Version: v9
-Last Updated: 2026-01-16
-
-For documentation, visit: https://github.com/YOUR_USERNAME/hive-schedule-manager
+Version: 2.0.0 (Standalone)
 """
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
 from typing import Any
+import json
 
 import voluptuous as vol
 import requests
+from pycognito import Cognito
 
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import config_validation as cv
-from homeassistant.const import CONF_SCAN_INTERVAL
+from homeassistant.const import CONF_USERNAME, CONF_PASSWORD, CONF_SCAN_INTERVAL
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.exceptions import HomeAssistantError
 
 _LOGGER = logging.getLogger(__name__)
 
 DOMAIN = "hive_schedule"
-DEFAULT_SCAN_INTERVAL = timedelta(hours=1)
+DEFAULT_SCAN_INTERVAL = timedelta(minutes=30)
+
+# Hive AWS Cognito configuration
+COGNITO_POOL_ID = "eu-west-1_SamNfoWtf"
+COGNITO_CLIENT_ID = "3rl4i0ajrmtdm8sbre54p9dvd9"
+COGNITO_REGION = "eu-west-1"
 
 # Service names
 SERVICE_SET_SCHEDULE = "set_heating_schedule"
@@ -43,6 +47,8 @@ ATTR_WAKE_TIME = "wake_time"
 CONFIG_SCHEMA = vol.Schema(
     {
         DOMAIN: vol.Schema({
+            vol.Required(CONF_USERNAME): cv.string,
+            vol.Required(CONF_PASSWORD): cv.string,
             vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): cv.time_period,
         })
     },
@@ -79,14 +85,85 @@ CALENDAR_SCHEMA = vol.Schema({
 })
 
 
+class HiveAuth:
+    """Handle Hive authentication via AWS Cognito."""
+    
+    def __init__(self, username: str, password: str) -> None:
+        """Initialize Hive authentication."""
+        self.username = username
+        self.password = password
+        self._cognito = None
+        self._id_token = None
+        self._access_token = None
+        self._token_expiry = None
+    
+    def authenticate(self) -> bool:
+        """Authenticate with Hive via AWS Cognito."""
+        try:
+            _LOGGER.debug("Authenticating with Hive API...")
+            
+            self._cognito = Cognito(
+                user_pool_id=COGNITO_POOL_ID,
+                client_id=COGNITO_CLIENT_ID,
+                user_pool_region=COGNITO_REGION,
+                username=self.username
+            )
+            
+            self._cognito.authenticate(password=self.password)
+            
+            self._id_token = self._cognito.id_token
+            self._access_token = self._cognito.access_token
+            self._token_expiry = datetime.now() + timedelta(minutes=55)  # Tokens expire after 1 hour, refresh at 55 min
+            
+            _LOGGER.info("✓ Successfully authenticated with Hive (token expires in ~55 minutes)")
+            return True
+            
+        except Exception as e:
+            _LOGGER.error("Failed to authenticate with Hive: %s", e)
+            return False
+    
+    def refresh_token(self) -> bool:
+        """Refresh the authentication token if needed."""
+        if not self._token_expiry or datetime.now() >= self._token_expiry:
+            _LOGGER.info("Token expired or missing, re-authenticating...")
+            return self.authenticate()
+        
+        try:
+            if self._cognito:
+                _LOGGER.debug("Refreshing token...")
+                self._cognito.renew_access_token()
+                self._id_token = self._cognito.id_token
+                self._access_token = self._cognito.access_token
+                self._token_expiry = datetime.now() + timedelta(minutes=55)
+                _LOGGER.info("✓ Token refreshed successfully")
+                return True
+        except Exception as e:
+            _LOGGER.warning("Token refresh failed, re-authenticating: %s", e)
+            return self.authenticate()
+        
+        return False
+    
+    def get_id_token(self) -> str | None:
+        """Get the current ID token, refreshing if needed."""
+        if not self._id_token or datetime.now() >= self._token_expiry:
+            self.refresh_token()
+        return self._id_token
+    
+    def get_access_token(self) -> str | None:
+        """Get the current access token, refreshing if needed."""
+        if not self._access_token or datetime.now() >= self._token_expiry:
+            self.refresh_token()
+        return self._access_token
+
+
 class HiveScheduleAPI:
     """API client for Hive Schedule operations."""
     
     BASE_URL = "https://beekeeper-uk.hivehome.com/1.0"
     
-    def __init__(self, hass: HomeAssistant) -> None:
+    def __init__(self, auth: HiveAuth) -> None:
         """Initialize the API client."""
-        self.hass = hass
+        self.auth = auth
         self.session = requests.Session()
         self.session.headers.update({
             "Content-Type": "application/json",
@@ -94,30 +171,9 @@ class HiveScheduleAPI:
             "Origin": "https://my.hivehome.com",
             "Referer": "https://my.hivehome.com/"
         })
-        self._token: str | None = None
-        self._hive_api = None  # Store reference to Hive's API client
-    
-    def set_hive_api(self, hive_api) -> None:
-        """Set reference to Hive's API client."""
-        self._hive_api = hive_api
-        _LOGGER.debug("Set reference to Hive API client")
-    
-    def update_auth(self, token: str) -> None:
-        """Update authorization token."""
-        self._token = token
-        self.session.headers["Authorization"] = token
-        _LOGGER.debug("Updated API authorization token (length: %d)", len(token) if token else 0)
-    
-    @property
-    def has_auth(self) -> bool:
-        """Check if we have a valid auth token."""
-        return self._token is not None or self._hive_api is not None
     
     @staticmethod
     def time_to_minutes(time_str: str) -> int:
-        """Convert time string to minutes from midnight."""
-        h, m = map(int, time_str.split(":"))
-        return h * 60 + m
         """Convert time string to minutes from midnight."""
         h, m = map(int, time_str.split(":"))
         return h * 60 + m
@@ -131,30 +187,12 @@ class HiveScheduleAPI:
     
     def update_schedule(self, node_id: str, schedule_data: dict[str, Any]) -> bool:
         """Send schedule update to Hive."""
-        if not self.has_auth:
+        # Get fresh token
+        token = self.auth.get_id_token()
+        
+        if not token:
             _LOGGER.error("Cannot update schedule: No auth token available")
-            raise HomeAssistantError(
-                "Hive authentication not available. Ensure Hive integration is loaded."
-            )
-        
-        # Priority 1: Try to get live token from Hive API runtime
-        token = None
-        if self._hive_api and hasattr(self._hive_api, 'auth'):
-            auth = self._hive_api.auth
-            if hasattr(auth, 'access_token'):
-                token = auth.access_token
-                if token:
-                    _LOGGER.debug("Using live token from Hive API runtime")
-        
-        # Priority 2: Use stored token
-        if not token:
-            token = self._token
-            if token:
-                _LOGGER.debug("Using stored token")
-        
-        if not token:
-            _LOGGER.error("Cannot update schedule: Unable to get auth token")
-            raise HomeAssistantError("Hive authentication not available - token is None")
+            raise HomeAssistantError("Failed to authenticate with Hive")
         
         # Update session header with current token
         self.session.headers["Authorization"] = token
@@ -163,18 +201,29 @@ class HiveScheduleAPI:
         
         try:
             _LOGGER.debug("Sending schedule update to %s", url)
-            _LOGGER.debug("Using token (first 20 chars): %s...", token[:20] if token else "None")
             response = self.session.post(url, json=schedule_data, timeout=30)
             response.raise_for_status()
-            _LOGGER.info("Successfully updated Hive schedule for node %s", node_id)
+            _LOGGER.info("✓ Successfully updated Hive schedule for node %s", node_id)
             return True
         except requests.exceptions.HTTPError as err:
             if err.response.status_code == 401:
-                _LOGGER.error("Authentication failed (401). Token may have expired.")
-                _LOGGER.error("Response: %s", err.response.text[:200] if hasattr(err.response, 'text') else 'no response text')
-                raise HomeAssistantError(
-                    "Hive authentication failed. Token expired - restart Home Assistant to refresh."
-                ) from err
+                _LOGGER.error("Authentication failed (401)")
+                _LOGGER.error("Response: %s", err.response.text[:200] if hasattr(err.response, 'text') else 'no response')
+                
+                # Try to refresh token and retry once
+                _LOGGER.info("Attempting to refresh token and retry...")
+                if self.auth.refresh_token():
+                    token = self.auth.get_id_token()
+                    self.session.headers["Authorization"] = token
+                    try:
+                        response = self.session.post(url, json=schedule_data, timeout=30)
+                        response.raise_for_status()
+                        _LOGGER.info("✓ Successfully updated Hive schedule after token refresh")
+                        return True
+                    except Exception as retry_err:
+                        _LOGGER.error("Retry failed: %s", retry_err)
+                
+                raise HomeAssistantError("Hive authentication failed") from err
             if err.response.status_code == 404:
                 _LOGGER.error("Node ID not found: %s", node_id)
                 raise HomeAssistantError(f"Invalid node ID: {node_id}") from err
@@ -191,207 +240,47 @@ class HiveScheduleAPI:
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     """Set up the Hive Schedule Manager component."""
     
-    _LOGGER.info("Setting up Hive Schedule Manager")
+    _LOGGER.info("Setting up Hive Schedule Manager (Standalone v2.0)")
     
-    # Get scan interval
-    scan_interval = config.get(DOMAIN, {}).get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+    # Get configuration
+    conf = config.get(DOMAIN, {})
+    username = conf.get(CONF_USERNAME)
+    password = conf.get(CONF_PASSWORD)
+    scan_interval = conf.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
     
-    def get_hive_auth_token() -> str | None:
-        """Extract auth token from Hive integration using config entries."""
-        _LOGGER.warning("=== SEARCHING FOR HIVE AUTH TOKEN ===")
-        
-        try:
-            # Get Hive config entries
-            hive_entries = hass.config_entries.async_entries("hive")
-            
-            if not hive_entries:
-                _LOGGER.warning("No Hive config entries found. Is the Hive integration set up?")
-                return None
-            
-            for entry in hive_entries:
-                _LOGGER.warning("Checking Hive config entry: %s", entry.entry_id)
-                
-                # Method 1: Check runtime_data.auth.access_token (apyhiveapi structure)
-                if hasattr(entry, 'runtime_data') and entry.runtime_data:
-                    runtime = entry.runtime_data
-                    _LOGGER.warning("  Found runtime_data of type: %s", type(runtime).__name__)
-                    
-                    # apyhiveapi stores auth in runtime.auth.access_token
-                    if hasattr(runtime, 'auth'):
-                        auth = runtime.auth
-                        _LOGGER.warning("  Found runtime.auth of type: %s", type(auth).__name__)
-                        
-                        if hasattr(auth, 'access_token'):
-                            token = auth.access_token
-                            _LOGGER.warning("  runtime.auth.access_token type: %s", type(token).__name__ if token else "None")
-                            
-                            if token and isinstance(token, str) and len(token) > 50:
-                                _LOGGER.info("✓ Found token at runtime_data.auth.access_token (length: %d)", len(token))
-                                return token
-                            else:
-                                _LOGGER.warning("  runtime.auth.access_token is None or too short")
-                    
-                    # Also check session.auth.access_token
-                    if hasattr(runtime, 'session') and hasattr(runtime.session, 'auth'):
-                        auth = runtime.session.auth
-                        if hasattr(auth, 'access_token'):
-                            token = auth.access_token
-                            if token and isinstance(token, str) and len(token) > 50:
-                                _LOGGER.info("✓ Found token at runtime_data.session.auth.access_token")
-                                return token
-                
-                # Method 2: Check entry.data['tokens'] (stored tokens)
-                if entry.data and 'tokens' in entry.data:
-                    tokens = entry.data['tokens']
-                    _LOGGER.warning("  Found 'tokens' in entry.data: %s", type(tokens).__name__)
-                    
-                    # Tokens might be a dict
-                    if isinstance(tokens, dict):
-                        _LOGGER.warning("  entry.data['tokens'] is dict with keys: %s", list(tokens.keys())[:10])
-                        
-                        # AWS Cognito structure: tokens['AuthenticationResult'] contains the actual tokens
-                        if 'AuthenticationResult' in tokens:
-                            auth_result = tokens['AuthenticationResult']
-                            _LOGGER.warning("    Found 'AuthenticationResult', checking for tokens...")
-                            
-                            if isinstance(auth_result, dict):
-                                # Check for common AWS Cognito token keys
-                                for key in ['IdToken', 'AccessToken', 'id_token', 'access_token']:
-                                    if key in auth_result:
-                                        token = auth_result[key]
-                                        _LOGGER.warning("      Found '%s' in AuthenticationResult, type: %s", key, type(token).__name__)
-                                        
-                                        if token and isinstance(token, str) and len(token) > 50:
-                                            _LOGGER.info("✓ Found token at entry.data['tokens']['AuthenticationResult']['%s'] (length: %d)", key, len(token))
-                                            return token
-                                        else:
-                                            _LOGGER.warning("      '%s' is None or too short", key)
-                        
-                        # Also check direct keys (original code)
-                        for key in ['IdToken', 'id_token', 'access_token', 'AccessToken', 'token']:
-                            if key in tokens:
-                                token = tokens[key]
-                                _LOGGER.warning("    Found '%s' in tokens dict, type: %s", key, type(token).__name__)
-                                
-                                if token and isinstance(token, str) and len(token) > 50:
-                                    _LOGGER.info("✓ Found token at entry.data['tokens']['%s'] (length: %d)", key, len(token))
-                                    return token
-                                else:
-                                    _LOGGER.warning("    '%s' is None or too short", key)
-                    
-                    # Tokens might be a string directly
-                    elif isinstance(tokens, str) and len(tokens) > 50:
-                        _LOGGER.info("✓ Found token at entry.data['tokens'] (length: %d)", len(tokens))
-                        return tokens
-                    else:
-                        _LOGGER.warning("  entry.data['tokens'] is %s: %s", type(tokens).__name__, str(tokens)[:100])
-                
-                # Method 3: Try to trigger a token refresh by calling the auth method
-                if hasattr(entry, 'runtime_data') and entry.runtime_data:
-                    runtime = entry.runtime_data
-                    if hasattr(runtime, 'auth'):
-                        auth = runtime.auth
-                        
-                        _LOGGER.warning("  Checking auth methods...")
-                        # Check if there's a method to get the token
-                        for method_name in ['get_access_token', 'getAccessToken', 'token', 'get_token']:
-                            if hasattr(auth, method_name):
-                                try:
-                                    method = getattr(auth, method_name)
-                                    if callable(method):
-                                        _LOGGER.warning("    Calling auth.%s()...", method_name)
-                                        token = method()
-                                        if token and isinstance(token, str) and len(token) > 50:
-                                            _LOGGER.info("✓ Found token via auth.%s() (length: %d)", method_name, len(token))
-                                            return token
-                                except Exception as e:
-                                    _LOGGER.warning("    Error calling auth.%s(): %s", method_name, str(e))
-            
-            _LOGGER.warning("Could not find Hive auth token in any expected location")
-            
-        except Exception as e:
-            _LOGGER.error("Error searching for Hive token: %s", e, exc_info=True)
-        
-        return None
+    if not username or not password:
+        _LOGGER.error("Hive username and password are required in configuration.yaml")
+        return False
     
-    # Initialize API
-    api = HiveScheduleAPI(hass)
-    hass.data[DOMAIN] = {"api": api}
+    # Initialize authentication and API
+    auth = HiveAuth(username, password)
+    api = HiveScheduleAPI(auth)
     
-    async def refresh_auth(now=None) -> None:
-        """Refresh authentication token from Hive integration."""
-        # First, try to trigger Hive to refresh its token
-        hive_entries = hass.config_entries.async_entries("hive")
-        for entry in hive_entries:
-            if hasattr(entry, 'runtime_data') and entry.runtime_data:
-                runtime = entry.runtime_data
-                
-                # Try to trigger a token refresh in the Hive integration
-                if hasattr(runtime, 'auth'):
-                    auth = runtime.auth
-                    
-                    # Check if auth has a refresh method
-                    for method_name in ['refresh', 'refreshToken', 'refresh_token', 'updateTokens']:
-                        if hasattr(auth, method_name):
-                            try:
-                                method = getattr(auth, method_name)
-                                if callable(method):
-                                    _LOGGER.debug("Calling auth.%s() to refresh token", method_name)
-                                    
-                                    # Try calling it (might be async or sync)
-                                    try:
-                                        result = await method()
-                                        _LOGGER.debug("Token refresh returned: %s", type(result))
-                                    except TypeError:
-                                        # Not async, try sync
-                                        result = await hass.async_add_executor_job(method)
-                                        _LOGGER.debug("Token refresh (sync) returned: %s", type(result))
-                                    break
-                            except Exception as e:
-                                _LOGGER.debug("Error calling auth.%s(): %s", method_name, e)
-                
-                # Now check if access_token is populated
-                if hasattr(runtime, 'auth') and hasattr(runtime.auth, 'access_token'):
-                    token = runtime.auth.access_token
-                    if token and isinstance(token, str) and len(token) > 50:
-                        _LOGGER.info("✓ Got live token from runtime.auth.access_token after refresh")
-                        api.update_auth(token)
-                        api.set_hive_api(runtime.api if hasattr(runtime, 'api') else None)
-                        return
-        
-        # If live token not available, try stored token
-        token = await hass.async_add_executor_job(get_hive_auth_token)
-        if token:
-            if not api.has_auth:
-                _LOGGER.info("Using stored token from entry.data (may need refresh)")
-            api.update_auth(token)
-        else:
-            # Try to get reference to Hive API client instead
-            for entry in hive_entries:
-                if hasattr(entry, 'runtime_data') and entry.runtime_data:
-                    runtime = entry.runtime_data
-                    if hasattr(runtime, 'api'):
-                        api.set_hive_api(runtime.api)
-                        _LOGGER.info("Using Hive's API client for authentication")
-                        return
-            
-            if now is None:  # Only log on startup
-                _LOGGER.debug("Hive integration not ready yet, will retry every %s", scan_interval)
+    # Store in hass.data
+    hass.data[DOMAIN] = {
+        "auth": auth,
+        "api": api
+    }
     
-    # Set up periodic refresh
-    async_track_time_interval(hass, refresh_auth, scan_interval)
+    # Initial authentication
+    def initial_auth():
+        """Perform initial authentication."""
+        if not auth.authenticate():
+            _LOGGER.error("Initial authentication failed - check your Hive username and password")
+            return False
+        return True
     
-    # Try initial auth
-    await refresh_auth()
+    if not await hass.async_add_executor_job(initial_auth):
+        _LOGGER.warning("Failed to authenticate on startup - will retry")
     
-    if not api.has_auth:
-        _LOGGER.warning(
-            "Hive authentication token not available yet. "
-            "Services will be available but may fail until Hive integration is fully loaded. "
-            "Token refresh configured every %s.",
-            scan_interval
-        )
+    # Set up periodic token refresh
+    async def refresh_token_periodic(now=None):
+        """Periodically refresh the authentication token."""
+        await hass.async_add_executor_job(auth.refresh_token)
     
+    async_track_time_interval(hass, refresh_token_periodic, scan_interval)
+    
+    # Service handlers
     async def handle_set_schedule(call: ServiceCall) -> None:
         """Handle set_heating_schedule service call."""
         node_id = call.data[ATTR_NODE_ID]
@@ -490,12 +379,6 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
                 {ATTR_NODE_ID: node_id, ATTR_DAY: day, ATTR_SCHEDULE: day_schedule}
             )
         )
-        
-        _LOGGER.info(
-            "Updated %s schedule for %s",
-            day,
-            "workday" if is_workday else "weekend"
-        )
     
     # Register services
     hass.services.async_register(
@@ -510,199 +393,17 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         DOMAIN, SERVICE_UPDATE_FROM_CALENDAR, handle_calendar_update, schema=CALENDAR_SCHEMA
     )
     
-    # DEBUG SERVICE
-    async def handle_debug_hive(call: ServiceCall) -> None:
-        """Debug service to inspect Hive data structure."""
-        _LOGGER.warning("=" * 80)
-        _LOGGER.warning("MANUAL DEBUG TRIGGERED")
-        _LOGGER.warning("=" * 80)
-        
-        token = await hass.async_add_executor_job(get_hive_auth_token)
-        if token:
-            _LOGGER.warning("✓ Token found! Length: %d", len(token))
-        else:
-            _LOGGER.error("✗ Token NOT found")
-            
-            # Additional debugging
-            _LOGGER.warning("=" * 80)
-            _LOGGER.warning("DETAILED DEBUG INFO")
-            _LOGGER.warning("=" * 80)
-            hive_entries = hass.config_entries.async_entries("hive")
-            _LOGGER.warning("Number of Hive entries: %d", len(hive_entries))
-            
-            for idx, entry in enumerate(hive_entries):
-                _LOGGER.warning("")
-                _LOGGER.warning("Entry #%d:", idx + 1)
-                _LOGGER.warning("  Entry ID: %s", entry.entry_id)
-                _LOGGER.warning("  State: %s", entry.state)
-                
-                # Check entry.data in detail
-                if entry.data:
-                    _LOGGER.warning("  entry.data keys: %s", list(entry.data.keys()))
-                    
-                    # Look at 'tokens' in detail
-                    if 'tokens' in entry.data:
-                        tokens = entry.data['tokens']
-                        _LOGGER.warning("  entry.data['tokens'] type: %s", type(tokens).__name__)
-                        
-                        if isinstance(tokens, dict):
-                            _LOGGER.warning("  entry.data['tokens'] keys: %s", list(tokens.keys()))
-                            for key, value in tokens.items():
-                                if isinstance(value, str):
-                                    _LOGGER.warning("    '%s': <string length %d>", key, len(value))
-                                else:
-                                    _LOGGER.warning("    '%s': %s", key, type(value).__name__)
-                        elif isinstance(tokens, str):
-                            _LOGGER.warning("  entry.data['tokens'] is string, length: %d", len(tokens))
-                        else:
-                            _LOGGER.warning("  entry.data['tokens'] is: %s", tokens)
-                
-                # Check runtime_data
-                _LOGGER.warning("  Has runtime_data: %s", hasattr(entry, 'runtime_data') and entry.runtime_data is not None)
-                
-                if hasattr(entry, 'runtime_data') and entry.runtime_data:
-                    runtime = entry.runtime_data
-                    _LOGGER.warning("  Runtime type: %s", type(runtime).__name__)
-                    _LOGGER.warning("  Runtime module: %s", type(runtime).__module__)
-                    
-                    # Check auth in detail
-                    if hasattr(runtime, 'auth'):
-                        auth = runtime.auth
-                        _LOGGER.warning("  runtime.auth type: %s", type(auth).__name__)
-                        
-                        # Check access_token
-                        if hasattr(auth, 'access_token'):
-                            token_val = auth.access_token
-                            _LOGGER.warning("    auth.access_token: %s", type(token_val).__name__ if token_val else "None")
-                            if token_val and isinstance(token_val, str):
-                                _LOGGER.warning("    auth.access_token length: %d", len(token_val))
-                        
-                        # Check other token-like attributes
-                        for attr in ['id_token', 'refresh_token', 'token', '_token']:
-                            if hasattr(auth, attr):
-                                val = getattr(auth, attr)
-                                _LOGGER.warning("    auth.%s: %s", attr, type(val).__name__ if val else "None")
-                                if val and isinstance(val, str):
-                                    _LOGGER.warning("      length: %d", len(val))
-                    
-                    # Check if runtime has a 'tokens' attribute (Map)
-                    if hasattr(runtime, 'tokens'):
-                        tokens_map = runtime.tokens
-                        _LOGGER.warning("  runtime.tokens type: %s", type(tokens_map).__name__)
-                        
-                        # Try to access it like a dict
-                        try:
-                            if hasattr(tokens_map, '__getitem__'):
-                                for key in ['access_token', 'id_token', 'refresh_token', 'AccessToken', 'IdToken']:
-                                    try:
-                                        val = tokens_map[key]
-                                        _LOGGER.warning("    tokens['%s']: %s", key, type(val).__name__ if val else "None")
-                                        if val and isinstance(val, str):
-                                            _LOGGER.warning("      length: %d", len(val))
-                                    except (KeyError, TypeError):
-                                        pass
-                        except Exception as e:
-                            _LOGGER.warning("    Cannot access tokens map: %s", e)
-    
-    hass.services.async_register(DOMAIN, "debug_hive_data", handle_debug_hive)
-    
-    # Service to find node IDs
-    async def handle_find_nodes(call: ServiceCall) -> None:
-        """Find all Hive heating node IDs."""
-        _LOGGER.warning("=" * 80)
-        _LOGGER.warning("SEARCHING FOR HIVE HEATING NODE IDS")
-        _LOGGER.warning("=" * 80)
-        
-        hive_entries = hass.config_entries.async_entries("hive")
-        
-        for entry in hive_entries:
-            if hasattr(entry, 'runtime_data') and entry.runtime_data:
-                runtime = entry.runtime_data
-                
-                # Check devices dict
-                if hasattr(runtime, 'devices'):
-                    devices = runtime.devices
-                    _LOGGER.warning("Found %d devices in Hive integration:", len(devices))
-                    
-                    for device_id, device_data in devices.items():
-                        _LOGGER.warning("")
-                        _LOGGER.warning("Device ID: %s", device_id)
-                        
-                        if isinstance(device_data, dict):
-                            # Extract useful info
-                            device_name = device_data.get('hiveName') or device_data.get('device_name') or device_data.get('haName', 'Unknown')
-                            device_type = device_data.get('hiveType') or device_data.get('haType', 'unknown')
-                            
-                            _LOGGER.warning("  Name: %s", device_name)
-                            _LOGGER.warning("  Type: %s", device_type)
-                            
-                            # Check if this is a heating device
-                            if 'heating' in str(device_type).lower() or 'thermostat' in str(device_type).lower() or 'climate' in str(device_type).lower():
-                                _LOGGER.warning("  ★★★ HEATING DEVICE FOUND ★★★")
-                                _LOGGER.warning("  ★★★ Use this node_id: %s", device_id)
-                                _LOGGER.warning("  ★★★ Device name: %s", device_name)
-                            elif len(device_id) > 20:  # UUIDs are typically 36 chars
-                                _LOGGER.warning("  → Possible node_id (check if this is your heating)")
-                
-                # Also try to match with climate entity
-                _LOGGER.warning("")
-                _LOGGER.warning("Cross-referencing with Home Assistant climate entities:")
-                for state in hass.states.async_all("climate"):
-                    _LOGGER.warning("  Climate entity: %s", state.entity_id)
-                    _LOGGER.warning("    Friendly name: %s", state.attributes.get('friendly_name', 'Unknown'))
-                    
-                    # Try to find matching device
-                    entity_id_parts = state.entity_id.split('.')
-                    if len(entity_id_parts) > 1:
-                        entity_name = entity_id_parts[1]
-                        
-                        # Look for matching device
-                        for device_id, device_data in runtime.devices.items():
-                            if isinstance(device_data, dict):
-                                device_name = (device_data.get('hiveName') or 
-                                             device_data.get('device_name') or 
-                                             device_data.get('haName', '')).lower()
-                                
-                                if entity_name in device_name or device_name in entity_name:
-                                    _LOGGER.warning("    ★★★ MATCHED to device ID: %s", device_id)
-                                    _LOGGER.warning("    ★★★ Use this as your node_id!")
-        
-        _LOGGER.warning("")
-        _LOGGER.warning("=" * 80)
-    
-    hass.services.async_register(DOMAIN, "find_node_ids", handle_find_nodes)
-    
-    # Service to manually refresh token
+    # Manual refresh service
     async def handle_refresh_token(call: ServiceCall) -> None:
         """Manually refresh the Hive authentication token."""
-        _LOGGER.warning("Manual token refresh requested")
-        await refresh_auth(now=True)
-        
-        if api.has_auth:
-            _LOGGER.warning("✓ Token refresh successful")
+        _LOGGER.info("Manual token refresh requested")
+        success = await hass.async_add_executor_job(auth.refresh_token)
+        if success:
+            _LOGGER.info("✓ Token refresh successful")
         else:
             _LOGGER.error("✗ Token refresh failed")
     
     hass.services.async_register(DOMAIN, "refresh_token", handle_refresh_token)
     
-    # Register simple diagnostic service
-    async def handle_simple_diagnose(call: ServiceCall) -> None:
-        """Handle simple diagnostic service call."""
-        _LOGGER.warning("=" * 80)
-        _LOGGER.warning("SIMPLE DIAGNOSTIC SERVICE CALLED")
-        _LOGGER.warning("=" * 80)
-        
-        try:
-            # Import here to avoid issues
-            from .simple_diagnostics import simple_diagnostic
-            await hass.async_add_executor_job(simple_diagnostic, hass)
-        except ImportError as e:
-            _LOGGER.error("Failed to import simple_diagnostics: %s", e)
-        except Exception as e:
-            _LOGGER.error("Error running diagnostic: %s", e, exc_info=True)
-    
-    hass.services.async_register(DOMAIN, "simple_diagnose", handle_simple_diagnose)
-    _LOGGER.warning("Simple diagnostic service 'hive_schedule.simple_diagnose' has been registered")
-    
-    _LOGGER.info("Hive Schedule Manager setup complete")
+    _LOGGER.info("✓ Hive Schedule Manager setup complete (Standalone v2.0)")
     return True
