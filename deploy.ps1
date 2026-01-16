@@ -9,13 +9,22 @@ $versionFile = "version.txt"
 if (Test-Path $versionFile) {
     $currentVersion = Get-Content $versionFile -Raw
 } else {
-    $currentVersion = "0.0.1"
+    $currentVersion = "v0.0.1"
 }
 
-# Parse and increment version
-$versionParts = $currentVersion.Trim().Split('.')
-$major, $minor, $patch = [int]$versionParts[0], [int]$versionParts[1], [int]$versionParts[2]
-$newVersion = "$major.$minor.$($patch + 1)"
+# Parse version - extract prefix and numeric parts
+$match = $currentVersion.Trim() -match '^([a-zA-Z]*)(\d+)\.(\d+)\.(\d+)$'
+if (-not $match) {
+    Write-Host "Invalid version format. Expected format: v1.0.1 or 1.0.1" -ForegroundColor Red
+    exit 1
+}
+
+$prefix = $matches[1]
+$major = [int]$matches[2]
+$minor = [int]$matches[3]
+$patch = [int]$matches[4]
+
+$newVersion = "$prefix$major.$minor.$($patch + 1)"
 
 Write-Host "Current version: $currentVersion" -ForegroundColor Cyan
 Write-Host "New version: $newVersion" -ForegroundColor Green
