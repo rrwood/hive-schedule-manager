@@ -361,15 +361,17 @@ class HiveScheduleAPI:
                 
                 _LOGGER.info("Top-level device IDs: %s", top_level_ids)
                 
+                # Dump full structure of first device to understand nesting
+                if len(devices_data) > 0 and isinstance(devices_data[0], dict):
+                    _LOGGER.info("=== FULL STRUCTURE OF FIRST DEVICE ===")
+                    first_device_str = json.dumps(devices_data[0], indent=2, default=str)
+                    _LOGGER.info(first_device_str)
+                    _LOGGER.info("=== END FIRST DEVICE ===")
+                
                 # Now search recursively in all devices for the target node_id
                 _LOGGER.info("Searching recursively for node_id: %s", node_id)
                 for idx, device in enumerate(devices_data):
                     _LOGGER.debug("Searching in device %d (id=%s)", idx, device.get("id") if isinstance(device, dict) else "N/A")
-                    
-                    # Log structure of this device (with size limit to avoid huge logs)
-                    if isinstance(device, dict):
-                        device_str = json.dumps(device, indent=2, default=str)[:1000]
-                        _LOGGER.debug("Device %d structure (first 1000 chars):\n%s", idx, device_str)
                     
                     # Search this device for the node_id
                     schedule = self._find_schedule_in_object(device, node_id)
