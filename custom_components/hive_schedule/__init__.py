@@ -375,6 +375,19 @@ class HiveScheduleAPI:
         _LOGGER.info("Looking for node_id: %s", node_id)
         
         try:
+            # Write ENTIRE response to file for inspection FIRST
+            try:
+                import os
+                config_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                debug_file = os.path.join(config_dir, "hive_all_devices_debug.json")
+                
+                with open(debug_file, 'w') as f:
+                    json.dump(devices_data, f, indent=2, default=str)
+                
+                _LOGGER.info("✓ Wrote ALL devices response to: %s", debug_file)
+            except Exception as e:
+                _LOGGER.error("Could not write all devices debug file: %s", e)
+            
             # Structure 1: Check if it's a list
             if isinstance(devices_data, list):
                 _LOGGER.info("Response is a list with %d items", len(devices_data))
@@ -385,28 +398,16 @@ class HiveScheduleAPI:
                     device_id = device.get("id") if isinstance(device, dict) else "N/A"
                     top_level_ids.append(device_id)
                     device_keys = list(device.keys()) if isinstance(device, dict) else "N/A"
-                    _LOGGER.info("Item %d: id=%s, keys=%s", idx, device_id, device_keys)
+                    device_type = device.get("type") if isinstance(device, dict) else "N/A"
+                    _LOGGER.info("Item %d: id=%s, type=%s, keys=%s", idx, device_id, device_type, device_keys)
                 
                 _LOGGER.info("Top-level device IDs: %s", top_level_ids)
-                
-                # Write full structure of first device to file for inspection
-                if len(devices_data) > 0 and isinstance(devices_data[0], dict):
-                    try:
-                        import os
-                        config_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                        debug_file = os.path.join(config_dir, "hive_devices_debug.json")
-                        
-                        with open(debug_file, 'w') as f:
-                            json.dump(devices_data[0], f, indent=2, default=str)
-                        
-                        _LOGGER.info("✓ Wrote first device structure to: %s", debug_file)
-                    except Exception as e:
-                        _LOGGER.error("Could not write debug file: %s", e)
                 
                 # Now search recursively in all devices for the target node_id
                 _LOGGER.info("Searching recursively for node_id: %s", node_id)
                 for idx, device in enumerate(devices_data):
-                    _LOGGER.debug("Searching in device %d (id=%s)", idx, device.get("id") if isinstance(device, dict) else "N/A")
+                    device_id = device.get("id") if isinstance(device, dict) else "N/A"
+                    _LOGGER.debug("Searching in device %d (id=%s)", idx, device_id)
                     
                     # Search this device for the node_id
                     schedule = self._find_schedule_in_object(device, node_id)
@@ -419,7 +420,32 @@ class HiveScheduleAPI:
                 _LOGGER.info("Available top-level IDs: %s", top_level_ids)
                 return None
             
-            _LOGGER.warning("Response is not a list, it's: %s", type(devices_data))
+            # Structure 2: Check if it's a dict
+            elif isinstance(devices_data, dict):
+                _LOGGER.info("Response is a dict with %d keys", len(devices_data))
+                all_keys = list(devices_data.keys())
+                _LOGGER.info("Dict keys: %s", all_keys)
+                
+                # Try to directly find the node_id as a key
+                if node_id in devices_data:
+                    _LOGGER.info("✓ Found node_id as direct key in response")
+                    node_data = devices_data[node_id]
+                    if isinstance(node_data, dict) and "schedule" in node_data:
+                        _LOGGER.info("✓ Found schedule in direct node_id entry")
+                        return node_data.get("schedule")
+                
+                # Recursively search all values
+                _LOGGER.info("Searching recursively in dict values for node_id: %s", node_id)
+                for key, value in devices_data.items():
+                    if isinstance(value, (dict, list)):
+                        result = self._find_schedule_in_object(value, node_id, 0, f"[key={key}]")
+                        if result:
+                            return result
+                
+                _LOGGER.warning("Could not find node_id %s in dict", node_id)
+                return None
+            
+            _LOGGER.warning("Response is neither list nor dict, it's: %s", type(devices_data))
             return None
             
         except Exception as err:
