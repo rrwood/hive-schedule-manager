@@ -1,7 +1,7 @@
 """
 Hive Schedule Manager Integration for Home Assistant
 Enables programmatic control of British Gas Hive heating schedules.
-....
+
 For documentation, visit: https://github.com/YOUR_USERNAME/hive-schedule-manager
 """
 from __future__ import annotations
@@ -156,6 +156,9 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     
     _LOGGER.info("Setting up Hive Schedule Manager")
     
+    # Get scan interval first
+    scan_interval = config.get(DOMAIN, {}).get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+    
     def get_hive_auth_token() -> str | None:
         """Extract auth token from existing Hive integration."""
         if "hive" not in hass.data:
@@ -163,39 +166,56 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
             return None
         
         try:
-            # Try different methods to access the Hive session token
-            hive_data = hass.data["hive"]
+            # Get all Hive config entries
+            hive_entries = hass.config_entries.async_entries("hive")
+            if not hive_entries:
+                _LOGGER.debug("No Hive config entries found")
+                return None
             
-            # Method 1: Direct session access
-            if isinstance(hive_data, dict) and "session" in hive_data:
-                hive_session = hive_data["session"]
-                if hasattr(hive_session, "auth"):
-                    token = getattr(hive_session.auth, "token", None)
-                    if token:
-                        _LOGGER.debug("Retrieved token via Method 1 (session.auth.token)")
-                        return token
-            
-            # Method 2: Check if hive_data itself has auth
-            if hasattr(hive_data, "session"):
-                hive_session = hive_data.session
-                if hasattr(hive_session, "auth"):
-                    token = getattr(hive_session.auth, "token", None)
-                    if token:
-                        _LOGGER.debug("Retrieved token via Method 2 (hive_data.session.auth.token)")
-                        return token
-            
-            # Method 3: Direct token access
-            if hasattr(hive_data, "auth"):
-                token = getattr(hive_data.auth, "token", None)
-                if token:
-                    _LOGGER.debug("Retrieved token via Method 3 (hive_data.auth.token)")
-                    return token
+            # Try to get runtime_data from the entry (HA 2024.x+ approach)
+            for entry in hive_entries:
+                if hasattr(entry, "runtime_data") and entry.runtime_data:
+                    runtime_data = entry.runtime_data
+                    _LOGGER.debug("Found Hive runtime_data: %s", type(runtime_data))
                     
-            _LOGGER.warning("Hive integration loaded but could not find auth token")
-            _LOGGER.debug("Available hive_data keys: %s", list(hive_data.keys()) if isinstance(hive_data, dict) else "not a dict")
+                    # Try to access session/auth from runtime_data
+                    if hasattr(runtime_data, "session"):
+                        session = runtime_data.session
+                        if hasattr(session, "auth") and hasattr(session.auth, "token"):
+                            token = session.auth.token
+                            if token:
+                                _LOGGER.debug("Retrieved token from entry.runtime_data.session.auth.token")
+                                return token
+                    
+                    # Try direct auth access
+                    if hasattr(runtime_data, "auth") and hasattr(runtime_data.auth, "token"):
+                        token = runtime_data.auth.token
+                        if token:
+                            _LOGGER.debug("Retrieved token from entry.runtime_data.auth.token")
+                            return token
+                    
+                    # Try direct token access
+                    if hasattr(runtime_data, "token"):
+                        token = runtime_data.token
+                        if token:
+                            _LOGGER.debug("Retrieved token from entry.runtime_data.token")
+                            return token
+            
+            # Fallback: try old method from hass.data
+            hive_data = hass.data.get("hive")
+            if hive_data:
+                if isinstance(hive_data, dict) and "session" in hive_data:
+                    hive_session = hive_data["session"]
+                    if hasattr(hive_session, "auth") and hasattr(hive_session.auth, "token"):
+                        token = hive_session.auth.token
+                        if token:
+                            _LOGGER.debug("Retrieved token from hass.data['hive']['session'].auth.token")
+                            return token
+                            
+            _LOGGER.debug("Could not find auth token in Hive data structure")
             
         except (KeyError, AttributeError) as err:
-            _LOGGER.error("Could not access Hive auth token: %s", err)
+            _LOGGER.debug("Error accessing Hive auth token: %s", err)
         
         return None
     
@@ -203,34 +223,31 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     api = HiveScheduleAPI()
     hass.data[DOMAIN] = {"api": api}
     
-    # Run diagnostics to find where the token is stored
-    from .diagnostics import inspect_hive_data
-    inspect_hive_data(hass)
-    
     async def refresh_auth(now=None) -> None:
         """Refresh authentication token from Hive integration."""
         token = await hass.async_add_executor_job(get_hive_auth_token)
         if token:
+            if not api.has_auth:
+                _LOGGER.info("Successfully obtained Hive authentication token")
             api.update_auth(token)
         else:
-            _LOGGER.warning("Could not refresh Hive auth token")
+            if now is None:  # Only log on startup, not on every refresh
+                _LOGGER.debug("Hive integration not ready yet, will retry every %s", scan_interval)
     
-    # Initial auth with retry
+    # Set up periodic refresh first
+    async_track_time_interval(hass, refresh_auth, scan_interval)
+    
+    # Try initial auth
     await refresh_auth()
     
     if not api.has_auth:
         _LOGGER.warning(
-            "Could not get Hive authentication token on first attempt. "
-            "Will retry every %s. Ensure the Hive integration is configured.",
+            "Hive authentication token not available yet. "
+            "Services will be available but may fail until Hive integration is fully loaded. "
+            "Token refresh configured every %s.",
             scan_interval
         )
-        # Don't fail setup - just log warning and continue
-        # The periodic refresh will get the token when Hive integration is ready
-    
-    # Set up periodic refresh
-    scan_interval = config.get(DOMAIN, {}).get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
-    async_track_time_interval(hass, refresh_auth, scan_interval)
-    _LOGGER.debug("Set up auth token refresh every %s", scan_interval)
+        # Don't fail setup - allow integration to load and get token later
     
     async def handle_set_schedule(call: ServiceCall) -> None:
         """Handle set_heating_schedule service call."""
