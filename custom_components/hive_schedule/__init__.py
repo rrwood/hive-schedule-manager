@@ -332,6 +332,50 @@ class HiveScheduleAPI:
             "start": self.time_to_minutes(time_str)
         }
     
+    def get_schedule(self, node_id: str) -> dict[str, Any] | None:
+        """Fetch current schedule from Hive."""
+        token = self.auth.get_id_token()
+        
+        if not token:
+            _LOGGER.error("Cannot get schedule: No auth token available")
+            return None
+        
+        self.session.headers["Authorization"] = token
+        url = f"{self.BASE_URL}/nodes/heating/{node_id}"
+        
+        try:
+            _LOGGER.debug("Fetching current schedule from %s", url)
+            response = self.session.get(url, timeout=30)
+            response.raise_for_status()
+            
+            data = response.json()
+            if "schedule" in data:
+                _LOGGER.debug("✓ Successfully fetched schedule for node %s", node_id)
+                return data.get("schedule", {})
+            else:
+                _LOGGER.warning("No schedule data in response")
+                return None
+                
+        except requests.exceptions.HTTPError as err:
+            if err.response.status_code == 401:
+                _LOGGER.error("Authentication failed (401) when fetching schedule")
+                if self.auth.refresh_token():
+                    token = self.auth.get_id_token()
+                    self.session.headers["Authorization"] = token
+                    try:
+                        response = self.session.get(url, timeout=30)
+                        response.raise_for_status()
+                        data = response.json()
+                        if "schedule" in data:
+                            return data.get("schedule", {})
+                    except Exception as retry_err:
+                        _LOGGER.error("Retry failed: %s", retry_err)
+            _LOGGER.error("HTTP error fetching schedule: %s", err)
+            return None
+        except Exception as err:
+            _LOGGER.error("Error fetching schedule: %s", err)
+            return None
+    
     def update_schedule(self, node_id: str, schedule_data: dict[str, Any]) -> bool:
         """Send schedule update to Hive."""
         # Get fresh token
@@ -490,27 +534,44 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         
         _LOGGER.info("Setting schedule for %s on node %s", day, node_id)
         
-        # Default schedule for other days
-        default_schedule = [
-            {"time": "06:30", "temp": 18.0},
-            {"time": "08:00", "temp": 16.0},
-            {"time": "16:30", "temp": 19.5},
-            {"time": "21:30", "temp": 16.0}
-        ]
+        # Fetch current schedule to preserve other days
+        current_schedule = await hass.async_add_executor_job(api.get_schedule, node_id)
+        
+        if current_schedule is None:
+            _LOGGER.warning("Could not fetch current schedule, using defaults for other days")
+            # Default schedule for other days if we can't fetch current
+            default_schedule = [
+                {"time": "06:30", "temp": 18.0},
+                {"time": "08:00", "temp": 16.0},
+                {"time": "16:30", "temp": 19.5},
+                {"time": "21:30", "temp": 16.0}
+            ]
+            current_schedule = {
+                d: [api.build_schedule_entry(entry["time"], entry["temp"]) for entry in default_schedule]
+                for d in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+            }
         
         schedule_data: dict[str, Any] = {"schedule": {}}
         
         for d in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
             if d == day:
+                # Update the specified day with new schedule
                 schedule_data["schedule"][d] = [
                     api.build_schedule_entry(entry["time"], entry["temp"])
                     for entry in day_schedule
                 ]
+                _LOGGER.debug("Updated %s schedule: %s", d, schedule_data["schedule"][d])
             else:
-                schedule_data["schedule"][d] = [
-                    api.build_schedule_entry(entry["time"], entry["temp"])
-                    for entry in default_schedule
-                ]
+                # Preserve existing schedule for other days
+                if d in current_schedule:
+                    schedule_data["schedule"][d] = current_schedule[d]
+                    _LOGGER.debug("Preserved %s schedule from current settings", d)
+                else:
+                    # Fallback to default if day not found
+                    _LOGGER.warning("Day %s not found in current schedule, using default", d)
+                    schedule_data["schedule"][d] = [
+                        api.build_schedule_entry("06:30", 18.0)
+                    ]
         
         await hass.async_add_executor_job(api.update_schedule, node_id, schedule_data)
     
