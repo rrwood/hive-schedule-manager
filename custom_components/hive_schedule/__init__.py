@@ -24,6 +24,14 @@ from homeassistant.exceptions import HomeAssistantError
 
 _LOGGER = logging.getLogger(__name__)
 
+# Try to import ultra diagnostics
+try:
+    from .ultra_diagnostics import create_ultra_diagnostic_service
+    ULTRA_DIAGNOSTICS_AVAILABLE = True
+except ImportError:
+    ULTRA_DIAGNOSTICS_AVAILABLE = False
+    _LOGGER.warning("Ultra diagnostics not available")
+
 DOMAIN = "hive_schedule"
 DEFAULT_SCAN_INTERVAL = timedelta(hours=1)
 
@@ -479,6 +487,11 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
                         _LOGGER.info("  Runtime attributes: %s", attrs)
     
     hass.services.async_register(DOMAIN, "debug_hive_data", handle_debug_hive)
+    
+    # Register ultra diagnostic service if available
+    if ULTRA_DIAGNOSTICS_AVAILABLE:
+        create_ultra_diagnostic_service(hass)
+        _LOGGER.info("Ultra diagnostic service registered")
     
     _LOGGER.info("Hive Schedule Manager setup complete")
     return True
