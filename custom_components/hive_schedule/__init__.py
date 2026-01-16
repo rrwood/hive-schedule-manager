@@ -14,6 +14,7 @@ import json
 import voluptuous as vol
 import requests
 from pycognito import Cognito
+from botocore.exceptions import ClientError
 
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import config_validation as cv
@@ -35,6 +36,7 @@ COGNITO_REGION = "eu-west-1"
 SERVICE_SET_SCHEDULE = "set_heating_schedule"
 SERVICE_SET_DAY = "set_day_schedule"
 SERVICE_UPDATE_FROM_CALENDAR = "update_from_calendar"
+SERVICE_VERIFY_MFA = "verify_mfa_code"
 
 # Attributes
 ATTR_NODE_ID = "node_id"
@@ -42,6 +44,7 @@ ATTR_DAY = "day"
 ATTR_SCHEDULE = "schedule"
 ATTR_IS_WORKDAY = "is_workday"
 ATTR_WAKE_TIME = "wake_time"
+ATTR_MFA_CODE = "code"
 
 # Configuration schema
 CONFIG_SCHEMA = vol.Schema(
@@ -84,6 +87,10 @@ CALENDAR_SCHEMA = vol.Schema({
     vol.Optional(ATTR_WAKE_TIME): cv.string,
 })
 
+MFA_SCHEMA = vol.Schema({
+    vol.Required(ATTR_MFA_CODE): cv.string,
+})
+
 
 class HiveAuth:
     """Handle Hive authentication via AWS Cognito."""
@@ -96,8 +103,10 @@ class HiveAuth:
         self._id_token = None
         self._access_token = None
         self._token_expiry = None
+        self._mfa_required = False
+        self._mfa_session = None
     
-    def authenticate(self) -> bool:
+    def authenticate(self, mfa_code: str | None = None) -> bool:
         """Authenticate with Hive via AWS Cognito."""
         try:
             _LOGGER.debug("Authenticating with Hive API...")
@@ -109,18 +118,67 @@ class HiveAuth:
                 username=self.username
             )
             
+            if mfa_code:
+                # Complete MFA authentication
+                return self.verify_mfa(mfa_code)
+            
+            # Initial authentication attempt
             self._cognito.authenticate(password=self.password)
             
             self._id_token = self._cognito.id_token
             self._access_token = self._cognito.access_token
-            self._token_expiry = datetime.now() + timedelta(minutes=55)  # Tokens expire after 1 hour, refresh at 55 min
+            self._token_expiry = datetime.now() + timedelta(minutes=55)
+            self._mfa_required = False
             
             _LOGGER.info("✓ Successfully authenticated with Hive (token expires in ~55 minutes)")
             return True
             
+        except ClientError as e:
+            error_code = e.response.get("Error", {}).get("Code", "")
+            error_message = str(e)
+            
+            # Check if MFA is required
+            if error_code == "UserMFATypeNotFound" or "mfa" in error_message.lower():
+                self._mfa_required = True
+                self._mfa_session = self._cognito
+                _LOGGER.info("MFA required - SMS code has been sent to your registered phone")
+                return False
+            
+            _LOGGER.error("Failed to authenticate with Hive: %s", e)
+            return False
+            
         except Exception as e:
             _LOGGER.error("Failed to authenticate with Hive: %s", e)
             return False
+    
+    def verify_mfa(self, mfa_code: str) -> bool:
+        """Verify MFA code and complete authentication."""
+        try:
+            if not self._cognito:
+                _LOGGER.error("No active authentication session for MFA verification")
+                return False
+            
+            _LOGGER.debug("Verifying MFA code...")
+            
+            # Respond to MFA challenge
+            self._cognito.respond_to_authentication_challenge(mfa_code)
+            
+            self._id_token = self._cognito.id_token
+            self._access_token = self._cognito.access_token
+            self._token_expiry = datetime.now() + timedelta(minutes=55)
+            self._mfa_required = False
+            self._mfa_session = None
+            
+            _LOGGER.info("✓ MFA verification successful - authenticated with Hive")
+            return True
+            
+        except Exception as e:
+            _LOGGER.error("MFA verification failed: %s", e)
+            return False
+    
+    def is_mfa_required(self) -> bool:
+        """Check if MFA is required."""
+        return self._mfa_required
     
     def refresh_token(self) -> bool:
         """Refresh the authentication token if needed."""
@@ -134,7 +192,7 @@ class HiveAuth:
                 self._cognito.renew_access_token()
                 self._id_token = self._cognito.id_token
                 self._access_token = self._cognito.access_token
-                self._token_expiry = datetime.now() + timedelta(minutes=55)
+                self._token_expiry = datetime.now() + timedelta(minutes=55)  # Tokens expire after 1 hour, refresh at 55 min
                 _LOGGER.info("✓ Token refreshed successfully")
                 return True
         except Exception as e:
@@ -266,12 +324,16 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     def initial_auth():
         """Perform initial authentication."""
         if not auth.authenticate():
+            if auth.is_mfa_required():
+                _LOGGER.warning("MFA required - waiting for user to provide SMS code via verify_mfa_code service")
+                return False
             _LOGGER.error("Initial authentication failed - check your Hive username and password")
             return False
         return True
     
     if not await hass.async_add_executor_job(initial_auth):
-        _LOGGER.warning("Failed to authenticate on startup - will retry")
+        if not auth.is_mfa_required():
+            _LOGGER.warning("Failed to authenticate on startup - will retry")
     
     # Set up periodic token refresh
     async def refresh_token_periodic(now=None):
@@ -279,6 +341,29 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         await hass.async_add_executor_job(auth.refresh_token)
     
     async_track_time_interval(hass, refresh_token_periodic, scan_interval)
+    
+    # MFA verification service
+    async def handle_verify_mfa(call: ServiceCall) -> None:
+        """Handle MFA code verification."""
+        mfa_code = call.data.get(ATTR_MFA_CODE)
+        if not mfa_code:
+            _LOGGER.error("MFA code not provided")
+            return
+        
+        _LOGGER.info("Verifying MFA code...")
+        success = await hass.async_add_executor_job(auth.verify_mfa, mfa_code)
+        
+        if success:
+            _LOGGER.info("✓ MFA verified successfully - integration setup complete")
+        else:
+            _LOGGER.error("✗ MFA verification failed - invalid code")
+    
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_VERIFY_MFA,
+        handle_verify_mfa,
+        schema=MFA_SCHEMA
+    )
     
     # Service handlers
     async def handle_set_schedule(call: ServiceCall) -> None:
