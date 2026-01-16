@@ -199,7 +199,7 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     
     def get_hive_auth_token() -> str | None:
         """Extract auth token from Hive integration using config entries."""
-        _LOGGER.debug("=== SEARCHING FOR HIVE AUTH TOKEN ===")
+        _LOGGER.warning("=== SEARCHING FOR HIVE AUTH TOKEN ===")
         
         try:
             # Get Hive config entries
@@ -210,23 +210,27 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
                 return None
             
             for entry in hive_entries:
-                _LOGGER.debug("Checking Hive config entry: %s", entry.entry_id)
+                _LOGGER.warning("Checking Hive config entry: %s", entry.entry_id)
                 
                 # Method 1: Check runtime_data.auth.access_token (apyhiveapi structure)
                 if hasattr(entry, 'runtime_data') and entry.runtime_data:
                     runtime = entry.runtime_data
-                    _LOGGER.debug("  Found runtime_data of type: %s", type(runtime).__name__)
+                    _LOGGER.warning("  Found runtime_data of type: %s", type(runtime).__name__)
                     
                     # apyhiveapi stores auth in runtime.auth.access_token
                     if hasattr(runtime, 'auth'):
                         auth = runtime.auth
+                        _LOGGER.warning("  Found runtime.auth of type: %s", type(auth).__name__)
+                        
                         if hasattr(auth, 'access_token'):
                             token = auth.access_token
+                            _LOGGER.warning("  runtime.auth.access_token type: %s", type(token).__name__ if token else "None")
+                            
                             if token and isinstance(token, str) and len(token) > 50:
-                                _LOGGER.info("✓ Found token at runtime_data.auth.access_token")
+                                _LOGGER.info("✓ Found token at runtime_data.auth.access_token (length: %d)", len(token))
                                 return token
                             else:
-                                _LOGGER.debug("  runtime_data.auth.access_token exists but is None or invalid")
+                                _LOGGER.warning("  runtime.auth.access_token is None or too short")
                     
                     # Also check session.auth.access_token
                     if hasattr(runtime, 'session') and hasattr(runtime.session, 'auth'):
@@ -240,22 +244,30 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
                 # Method 2: Check entry.data['tokens'] (stored tokens)
                 if entry.data and 'tokens' in entry.data:
                     tokens = entry.data['tokens']
-                    _LOGGER.debug("  Found 'tokens' in entry.data: %s", type(tokens))
+                    _LOGGER.warning("  Found 'tokens' in entry.data: %s", type(tokens).__name__)
                     
                     # Tokens might be a dict
                     if isinstance(tokens, dict):
+                        _LOGGER.warning("  entry.data['tokens'] is dict with keys: %s", list(tokens.keys())[:10])
+                        
                         # Check for common token keys
                         for key in ['IdToken', 'id_token', 'access_token', 'AccessToken', 'token']:
                             if key in tokens:
                                 token = tokens[key]
+                                _LOGGER.warning("    Found '%s' in tokens dict, type: %s", key, type(token).__name__)
+                                
                                 if token and isinstance(token, str) and len(token) > 50:
-                                    _LOGGER.info("✓ Found token at entry.data['tokens']['%s']", key)
+                                    _LOGGER.info("✓ Found token at entry.data['tokens']['%s'] (length: %d)", key, len(token))
                                     return token
+                                else:
+                                    _LOGGER.warning("    '%s' is None or too short", key)
                     
                     # Tokens might be a string directly
                     elif isinstance(tokens, str) and len(tokens) > 50:
-                        _LOGGER.info("✓ Found token at entry.data['tokens']")
+                        _LOGGER.info("✓ Found token at entry.data['tokens'] (length: %d)", len(tokens))
                         return tokens
+                    else:
+                        _LOGGER.warning("  entry.data['tokens'] is %s: %s", type(tokens).__name__, str(tokens)[:100])
                 
                 # Method 3: Try to trigger a token refresh by calling the auth method
                 if hasattr(entry, 'runtime_data') and entry.runtime_data:
@@ -263,18 +275,20 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
                     if hasattr(runtime, 'auth'):
                         auth = runtime.auth
                         
+                        _LOGGER.warning("  Checking auth methods...")
                         # Check if there's a method to get the token
                         for method_name in ['get_access_token', 'getAccessToken', 'token', 'get_token']:
                             if hasattr(auth, method_name):
                                 try:
                                     method = getattr(auth, method_name)
                                     if callable(method):
+                                        _LOGGER.warning("    Calling auth.%s()...", method_name)
                                         token = method()
                                         if token and isinstance(token, str) and len(token) > 50:
-                                            _LOGGER.info("✓ Found token via auth.%s()", method_name)
+                                            _LOGGER.info("✓ Found token via auth.%s() (length: %d)", method_name, len(token))
                                             return token
                                 except Exception as e:
-                                    _LOGGER.debug("  Error calling auth.%s(): %s", method_name, e)
+                                    _LOGGER.warning("    Error calling auth.%s(): %s", method_name, str(e))
             
             _LOGGER.warning("Could not find Hive auth token in any expected location")
             
@@ -465,23 +479,74 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
                 _LOGGER.warning("Entry #%d:", idx + 1)
                 _LOGGER.warning("  Entry ID: %s", entry.entry_id)
                 _LOGGER.warning("  State: %s", entry.state)
+                
+                # Check entry.data in detail
+                if entry.data:
+                    _LOGGER.warning("  entry.data keys: %s", list(entry.data.keys()))
+                    
+                    # Look at 'tokens' in detail
+                    if 'tokens' in entry.data:
+                        tokens = entry.data['tokens']
+                        _LOGGER.warning("  entry.data['tokens'] type: %s", type(tokens).__name__)
+                        
+                        if isinstance(tokens, dict):
+                            _LOGGER.warning("  entry.data['tokens'] keys: %s", list(tokens.keys()))
+                            for key, value in tokens.items():
+                                if isinstance(value, str):
+                                    _LOGGER.warning("    '%s': <string length %d>", key, len(value))
+                                else:
+                                    _LOGGER.warning("    '%s': %s", key, type(value).__name__)
+                        elif isinstance(tokens, str):
+                            _LOGGER.warning("  entry.data['tokens'] is string, length: %d", len(tokens))
+                        else:
+                            _LOGGER.warning("  entry.data['tokens'] is: %s", tokens)
+                
+                # Check runtime_data
                 _LOGGER.warning("  Has runtime_data: %s", hasattr(entry, 'runtime_data') and entry.runtime_data is not None)
                 
                 if hasattr(entry, 'runtime_data') and entry.runtime_data:
                     runtime = entry.runtime_data
                     _LOGGER.warning("  Runtime type: %s", type(runtime).__name__)
                     _LOGGER.warning("  Runtime module: %s", type(runtime).__module__)
-                    if hasattr(runtime, '__dict__'):
-                        attrs = [k for k in vars(runtime).keys() if not k.startswith('_')]
-                        _LOGGER.warning("  Runtime attributes: %s", attrs)
+                    
+                    # Check auth in detail
+                    if hasattr(runtime, 'auth'):
+                        auth = runtime.auth
+                        _LOGGER.warning("  runtime.auth type: %s", type(auth).__name__)
                         
-                        # Check each attribute
-                        for attr in attrs:
-                            try:
-                                obj = getattr(runtime, attr)
-                                _LOGGER.warning("    %s: %s", attr, type(obj).__name__)
-                            except Exception as e:
-                                _LOGGER.warning("    %s: ERROR - %s", attr, str(e))
+                        # Check access_token
+                        if hasattr(auth, 'access_token'):
+                            token_val = auth.access_token
+                            _LOGGER.warning("    auth.access_token: %s", type(token_val).__name__ if token_val else "None")
+                            if token_val and isinstance(token_val, str):
+                                _LOGGER.warning("    auth.access_token length: %d", len(token_val))
+                        
+                        # Check other token-like attributes
+                        for attr in ['id_token', 'refresh_token', 'token', '_token']:
+                            if hasattr(auth, attr):
+                                val = getattr(auth, attr)
+                                _LOGGER.warning("    auth.%s: %s", attr, type(val).__name__ if val else "None")
+                                if val and isinstance(val, str):
+                                    _LOGGER.warning("      length: %d", len(val))
+                    
+                    # Check if runtime has a 'tokens' attribute (Map)
+                    if hasattr(runtime, 'tokens'):
+                        tokens_map = runtime.tokens
+                        _LOGGER.warning("  runtime.tokens type: %s", type(tokens_map).__name__)
+                        
+                        # Try to access it like a dict
+                        try:
+                            if hasattr(tokens_map, '__getitem__'):
+                                for key in ['access_token', 'id_token', 'refresh_token', 'AccessToken', 'IdToken']:
+                                    try:
+                                        val = tokens_map[key]
+                                        _LOGGER.warning("    tokens['%s']: %s", key, type(val).__name__ if val else "None")
+                                        if val and isinstance(val, str):
+                                            _LOGGER.warning("      length: %d", len(val))
+                                    except (KeyError, TypeError):
+                                        pass
+                        except Exception as e:
+                            _LOGGER.warning("    Cannot access tokens map: %s", e)
     
     hass.services.async_register(DOMAIN, "debug_hive_data", handle_debug_hive)
     
