@@ -121,26 +121,18 @@ class HiveAuth:
             )
             
             if mfa_code:
-                # Complete MFA authentication
                 return self.verify_mfa(mfa_code)
             
-            # Initial authentication attempt
             try:
                 self._cognito.authenticate(password=self.password)
             except SMSMFAChallengeException as mfa_error:
                 _LOGGER.debug("SMSMFAChallengeException caught during authentication")
-                _LOGGER.debug("Challenge info: %s", mfa_error)
-                
-                # Store the MFA session for later use
                 self._mfa_required = True
                 self._mfa_session = self._cognito
                 
-                # Extract session token from the exception - it's in args[1]['Session']
                 if len(mfa_error.args) > 1 and isinstance(mfa_error.args[1], dict):
                     challenge_params = mfa_error.args[1]
                     self._mfa_session_token = challenge_params.get('Session')
-                    _LOGGER.debug("Extracted session token from MFA exception")
-                    _LOGGER.debug("Session token (first 50 chars): %s", str(self._mfa_session_token)[:50] if self._mfa_session_token else "None")
                 
                 _LOGGER.info("MFA required - SMS code has been sent to your registered phone")
                 return False
@@ -148,10 +140,6 @@ class HiveAuth:
                 error_code = auth_error.response.get("Error", {}).get("Code", "")
                 error_message = str(auth_error)
                 
-                _LOGGER.debug("Authentication error code: %s", error_code)
-                _LOGGER.debug("Authentication error message: %s", error_message)
-                
-                # Check if MFA is required
                 if error_code in ["UserMFATypeNotFound", "SMS_MFA", "SOFTWARE_TOKEN_MFA"] or "mfa" in error_message.lower():
                     self._mfa_required = True
                     self._mfa_session = self._cognito
@@ -168,24 +156,8 @@ class HiveAuth:
             _LOGGER.info("✓ Successfully authenticated with Hive (token expires in ~55 minutes)")
             return True
             
-        except ClientError as e:
-            error_code = e.response.get("Error", {}).get("Code", "")
-            error_message = str(e)
-            
-            _LOGGER.debug("ClientError - Code: %s, Message: %s", error_code, error_message)
-            
-            if error_code in ["UserMFATypeNotFound", "SMS_MFA", "SOFTWARE_TOKEN_MFA"] or "mfa" in error_message.lower():
-                self._mfa_required = True
-                self._mfa_session = self._cognito
-                _LOGGER.info("MFA required - SMS code has been sent to your registered phone")
-                return False
-            
-            _LOGGER.error("Failed to authenticate with Hive: %s", e)
-            return False
-            
         except Exception as e:
             _LOGGER.error("Failed to authenticate with Hive: %s", e)
-            _LOGGER.debug("Exception type: %s", type(e).__name__)
             return False
     
     def verify_mfa(self, mfa_code: str) -> bool:
@@ -193,61 +165,34 @@ class HiveAuth:
         try:
             if not self._mfa_session or not self._mfa_required:
                 _LOGGER.error("No active MFA session - cannot verify code")
-                _LOGGER.debug("_mfa_session: %s, _mfa_required: %s", self._mfa_session, self._mfa_required)
                 return False
             
             _LOGGER.debug("Verifying MFA code...")
-            _LOGGER.debug("MFA Session token available: %s", bool(self._mfa_session_token))
             
-            # Use the stored cognito session to respond to the challenge
-            try:
-                # Try to answer the SMS MFA challenge
-                _LOGGER.debug("Attempting to answer SMS MFA challenge...")
+            if hasattr(self._mfa_session, 'client'):
+                client = self._mfa_session.client
                 
-                # Method 1: Direct client call with proper parameters
-                if hasattr(self._mfa_session, 'client'):
-                    client = self._mfa_session.client
-                    
-                    _LOGGER.debug("Calling respond_to_auth_challenge with ClientId=%s, ChallengeName=SMS_MFA", COGNITO_CLIENT_ID)
-                    
-                    # Build challenge responses - ensure all values are strings
-                    challenge_responses = {
-                        "USERNAME": str(self.username),
-                        "SMS_MFA_CODE": str(mfa_code)
-                    }
-                    
-                    _LOGGER.debug("Challenge responses: USERNAME=%s, SMS_MFA_CODE=%s", self.username, mfa_code)
-                    
-                    response = client.respond_to_auth_challenge(
-                        ClientId=COGNITO_CLIENT_ID,
-                        ChallengeName="SMS_MFA",
-                        Session=self._mfa_session_token,
-                        ChallengeResponses=challenge_responses
-                    )
-                    
-                    _LOGGER.debug("Auth challenge response status: %s", response.get("ResponseMetadata", {}).get("HTTPStatusCode"))
-                    
-                    # Extract tokens from response
-                    auth_result = response.get("AuthenticationResult", {})
-                    if auth_result:
-                        self._mfa_session.id_token = auth_result.get("IdToken")
-                        self._mfa_session.access_token = auth_result.get("AccessToken")
-                        _LOGGER.debug("Successfully extracted tokens from response")
-                    else:
-                        _LOGGER.error("No AuthenticationResult in response")
-                        _LOGGER.debug("Full response keys: %s", response.keys())
-                        return False
+                challenge_responses = {
+                    "USERNAME": str(self.username),
+                    "SMS_MFA_CODE": str(mfa_code)
+                }
+                
+                response = client.respond_to_auth_challenge(
+                    ClientId=COGNITO_CLIENT_ID,
+                    ChallengeName="SMS_MFA",
+                    Session=self._mfa_session_token,
+                    ChallengeResponses=challenge_responses
+                )
+                
+                auth_result = response.get("AuthenticationResult", {})
+                if auth_result:
+                    self._mfa_session.id_token = auth_result.get("IdToken")
+                    self._mfa_session.access_token = auth_result.get("AccessToken")
                 else:
-                    _LOGGER.error("Cannot access boto3 client from cognito session")
+                    _LOGGER.error("No AuthenticationResult in response")
                     return False
-            
-            except TypeError as type_err:
-                _LOGGER.error("Type error - likely parameter validation issue: %s", type_err)
-                _LOGGER.debug("Type error details: %s", str(type_err))
-                return False
-            except Exception as e:
-                _LOGGER.error("Failed to answer MFA challenge: %s", e)
-                _LOGGER.debug("Exception type: %s, Full error: %s", type(e).__name__, str(e))
+            else:
+                _LOGGER.error("Cannot access boto3 client from cognito session")
                 return False
             
             self._id_token = self._mfa_session.id_token
@@ -262,7 +207,6 @@ class HiveAuth:
             
         except Exception as e:
             _LOGGER.error("MFA verification failed: %s", e)
-            _LOGGER.debug("Exception type: %s", type(e).__name__)
             return False
     
     def is_mfa_required(self) -> bool:
@@ -342,14 +286,10 @@ class HiveScheduleAPI:
         
         self.session.headers["Authorization"] = token
         
-        # Try multiple endpoint variations
         endpoints_to_try = [
-            # Standard endpoint variations
             (f"{self.BASE_URL}/nodes/heating/{node_id}", "GET", None),
             (f"{self.BASE_URL}/nodes/{node_id}", "GET", None),
             (f"{self.BASE_URL}/heating/{node_id}", "GET", None),
-            
-            # Try POST with empty body (some APIs return data on POST)
             (f"{self.BASE_URL}/nodes/heating/{node_id}", "POST", {}),
             (f"{self.BASE_URL}/nodes/{node_id}", "POST", {}),
             (f"{self.BASE_URL}/heating/{node_id}", "POST", {}),
@@ -357,12 +297,16 @@ class HiveScheduleAPI:
         
         for url, method, body in endpoints_to_try:
             try:
-                _LOGGER.debug("Attempting to fetch schedule from: %s", url)
+                _LOGGER.debug("Attempting to fetch schedule: %s %s", method, url)
                 
                 if method == "GET":
                     response = self.session.get(url, timeout=30)
                 else:
                     response = self.session.post(url, json=body, timeout=30)
+                
+                if response.status_code in [403, 404]:
+                    _LOGGER.debug("Status %s - trying next endpoint", response.status_code)
+                    continue
                 
                 response.raise_for_status()
                 
@@ -379,83 +323,6 @@ class HiveScheduleAPI:
         
         _LOGGER.error("Could not fetch schedule from any endpoint")
         return None
-    
-    def set_schedule(self, node_id: str, schedule: dict[str, Any]) -> bool:
-        """Set the heating schedule for a node."""
-        token = self.auth.get_access_token()
-        
-        if not token:
-            _LOGGER.error("Cannot set schedule: No auth token available")
-            return False
-        
-        self.session.headers["Authorization"] = token
-        
-        url = f"{self.BASE_URL}/nodes/heating/{node_id}/schedule"
-        
-        try:
-            _LOGGER.debug("Setting schedule for node %s: %s", node_id, schedule)
-            response = self.session.put(url, json=schedule, timeout=30)
-            response.raise_for_status()
-            
-            _LOGGER.info("✓ Successfully set schedule for node %s", node_id)
-            return True
-        
-        except Exception as e:
-            _LOGGER.error("Failed to set schedule for node %s: %s", node_id, e)
-            return False
-    
-    def set_day_schedule(self, node_id: str, day: str, schedule: list[dict[str, Any]]) -> bool:
-        """Set the heating schedule for a specific day."""
-        token = self.auth.get_access_token()
-        
-        if not token:
-            _LOGGER.error("Cannot set day schedule: No auth token available")
-            return False
-        
-        self.session.headers["Authorization"] = token
-        
-        url = f"{self.BASE_URL}/nodes/heating/{node_id}/schedule/{day}"
-        
-        try:
-            _LOGGER.debug("Setting day schedule for node %s, day %s: %s", node_id, day, schedule)
-            response = self.session.put(url, json=schedule, timeout=30)
-            response.raise_for_status()
-            
-            _LOGGER.info("✓ Successfully set day schedule for node %s, day %s", node_id, day)
-            return True
-        
-        except Exception as e:
-            _LOGGER.error("Failed to set day schedule for node %s, day %s: %s", node_id, day, e)
-            return False
-    
-    def update_from_calendar(self, node_id: str, is_workday: bool, wake_time: str | None) -> bool:
-        """Update the schedule based on calendar event (workday or not)."""
-        token = self.auth.get_access_token()
-        
-        if not token:
-            _LOGGER.error("Cannot update from calendar: No auth token available")
-            return False
-        
-        self.session.headers["Authorization"] = token
-        
-        url = f"{self.BASE_URL}/nodes/heating/{node_id}/calendar"
-        
-        payload = {
-            "is_workday": is_workday,
-            "wake_time": wake_time
-        }
-        
-        try:
-            _LOGGER.debug("Updating from calendar for node %s: %s", node_id, payload)
-            response = self.session.put(url, json=payload, timeout=30)
-            response.raise_for_status()
-            
-            _LOGGER.info("✓ Successfully updated from calendar for node %s", node_id)
-            return True
-        
-        except Exception as e:
-            _LOGGER.error("Failed to update from calendar for node %s: %s", node_id, e)
-            return False
     
     def get_all_devices(self) -> dict[str, Any] | None:
         """Fetch all devices/nodes to get complete state including schedules."""
@@ -498,9 +365,140 @@ class HiveScheduleAPI:
         
         _LOGGER.error("Could not fetch devices from any endpoint")
         return None
+    
+    def update_schedule(self, node_id: str, schedule_data: dict[str, Any]) -> bool:
+        """Send schedule update to Hive."""
+        token = self.auth.get_id_token()
+        
+        if not token:
+            _LOGGER.error("Cannot update schedule: No auth token available")
+            raise HomeAssistantError("Failed to authenticate with Hive")
+        
+        self.session.headers["Authorization"] = token
+        url = f"{self.BASE_URL}/nodes/heating/{node_id}"
+        
+        try:
+            _LOGGER.debug("Sending schedule update to %s", url)
+            response = self.session.post(url, json=schedule_data, timeout=30)
+            response.raise_for_status()
+            _LOGGER.info("✓ Successfully updated Hive schedule for node %s", node_id)
+            return True
+        except requests.exceptions.HTTPError as err:
+            if err.response.status_code == 401:
+                _LOGGER.error("Authentication failed (401)")
+                if self.auth.refresh_token():
+                    token = self.auth.get_id_token()
+                    self.session.headers["Authorization"] = token
+                    try:
+                        response = self.session.post(url, json=schedule_data, timeout=30)
+                        response.raise_for_status()
+                        _LOGGER.info("✓ Successfully updated Hive schedule after token refresh")
+                        return True
+                    except Exception as retry_err:
+                        _LOGGER.error("Retry failed: %s", retry_err)
+                raise HomeAssistantError("Hive authentication failed") from err
+            if err.response.status_code == 404:
+                _LOGGER.error("Node ID not found: %s", node_id)
+                raise HomeAssistantError(f"Invalid node ID: {node_id}") from err
+            _LOGGER.error("HTTP error updating schedule: %s", err)
+            raise HomeAssistantError(f"Failed to update schedule: {err}") from err
+        except requests.exceptions.Timeout as err:
+            _LOGGER.error("Request to Hive API timed out")
+            raise HomeAssistantError("Hive API request timed out") from err
+        except requests.exceptions.RequestException as err:
+            _LOGGER.error("Request error updating schedule: %s", err)
+            raise HomeAssistantError(f"Failed to update schedule: {err}") from err
 
 
-async def handle_set_day(hass: HomeAssistant, api: HiveScheduleAPI, call: ServiceCall) -> None:
+async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
+    """Set up the Hive Schedule Manager component."""
+    
+    _LOGGER.info("Setting up Hive Schedule Manager (Standalone v2.0)")
+    
+    conf = config.get(DOMAIN, {})
+    username = conf.get(CONF_USERNAME)
+    password = conf.get(CONF_PASSWORD)
+    scan_interval = conf.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+    
+    if not username or not password:
+        _LOGGER.error("Hive username and password are required in configuration.yaml")
+        return False
+    
+    auth = HiveAuth(username, password)
+    api = HiveScheduleAPI(auth)
+    
+    hass.data[DOMAIN] = {
+        "auth": auth,
+        "api": api
+    }
+    
+    def initial_auth():
+        """Perform initial authentication."""
+        if not auth.authenticate():
+            if auth.is_mfa_required():
+                _LOGGER.warning("MFA required - waiting for user to provide SMS code via verify_mfa_code service")
+                return False
+            _LOGGER.error("Initial authentication failed - check your Hive username and password")
+            return False
+        return True
+    
+    if not await hass.async_add_executor_job(initial_auth):
+        if not auth.is_mfa_required():
+            _LOGGER.warning("Failed to authenticate on startup - will retry")
+    
+    async def refresh_token_periodic(now=None):
+        """Periodically refresh the authentication token."""
+        await hass.async_add_executor_job(auth.refresh_token)
+    
+    async_track_time_interval(hass, refresh_token_periodic, scan_interval)
+    
+    async def handle_verify_mfa(call: ServiceCall) -> None:
+        """Handle MFA code verification."""
+        mfa_code = call.data.get(ATTR_MFA_CODE)
+        if not mfa_code:
+            _LOGGER.error("MFA code not provided")
+            return
+        
+        _LOGGER.info("Verifying MFA code...")
+        success = await hass.async_add_executor_job(auth.verify_mfa, mfa_code)
+        
+        if success:
+            _LOGGER.info("✓ MFA verified successfully - integration setup complete")
+        else:
+            _LOGGER.error("✗ MFA verification failed - invalid code")
+    
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_VERIFY_MFA,
+        handle_verify_mfa,
+        schema=MFA_SCHEMA
+    )
+    
+    async def handle_set_schedule(call: ServiceCall) -> None:
+        """Handle set_heating_schedule service call."""
+        node_id = call.data[ATTR_NODE_ID]
+        schedule_config = call.data[ATTR_SCHEDULE]
+        
+        _LOGGER.info("Setting complete schedule for node %s", node_id)
+        
+        schedule_data: dict[str, Any] = {"schedule": {}}
+        
+        for day in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
+            if day in schedule_config:
+                day_schedule = []
+                for entry in schedule_config[day]:
+                    day_schedule.append(
+                        api.build_schedule_entry(entry["time"], entry["temp"])
+                    )
+                schedule_data["schedule"][day] = day_schedule
+            else:
+                schedule_data["schedule"][day] = [
+                    api.build_schedule_entry("00:00", 16.0)
+                ]
+        
+        await hass.async_add_executor_job(api.update_schedule, node_id, schedule_data)
+    
+    async def handle_set_day(call: ServiceCall) -> None:
         """Handle set_day_schedule service call."""
         node_id = call.data[ATTR_NODE_ID]
         day = call.data[ATTR_DAY].lower()
@@ -509,16 +507,13 @@ async def handle_set_day(hass: HomeAssistant, api: HiveScheduleAPI, call: Servic
         _LOGGER.info("Setting schedule for %s on node %s", day, node_id)
         _LOGGER.debug("New schedule for %s: %s", day, day_schedule)
         
-        # Try to fetch current schedule
         current_schedule = await hass.async_add_executor_job(api.get_schedule, node_id)
         
         if current_schedule is None:
             _LOGGER.warning("Could not fetch schedule directly, trying to get all devices")
-            # Try to fetch all devices to find this node's schedule
             all_devices = await hass.async_add_executor_job(api.get_all_devices)
             if all_devices:
                 _LOGGER.debug("Got devices response, looking for node %s", node_id)
-                # You'll need to parse this based on actual API response structure
                 _LOGGER.debug("Full devices response: %s", json.dumps(all_devices, indent=2, default=str)[:2000])
             
             _LOGGER.error("Could not fetch current schedule - cannot safely update single day")
@@ -530,14 +525,12 @@ async def handle_set_day(hass: HomeAssistant, api: HiveScheduleAPI, call: Servic
         
         for d in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
             if d == day:
-                # Update the specified day with new schedule
                 schedule_data["schedule"][d] = [
                     api.build_schedule_entry(entry["time"], entry["temp"])
                     for entry in day_schedule
                 ]
                 _LOGGER.info("Updated %s: %s", d, json.dumps(schedule_data["schedule"][d], indent=2))
             else:
-                # Preserve existing schedule for other days
                 if d in current_schedule:
                     schedule_data["schedule"][d] = current_schedule[d]
                     _LOGGER.info("Preserved %s: %s", d, json.dumps(current_schedule[d], indent=2, default=str))
@@ -547,3 +540,66 @@ async def handle_set_day(hass: HomeAssistant, api: HiveScheduleAPI, call: Servic
         
         _LOGGER.info("Complete schedule to send: %s", json.dumps(schedule_data, indent=2, default=str))
         await hass.async_add_executor_job(api.update_schedule, node_id, schedule_data)
+    
+    async def handle_calendar_update(call: ServiceCall) -> None:
+        """Handle update_from_calendar service call."""
+        node_id = call.data[ATTR_NODE_ID]
+        is_workday = call.data[ATTR_IS_WORKDAY]
+        wake_time = call.data.get(ATTR_WAKE_TIME, "06:30" if is_workday else "07:30")
+        
+        tomorrow = datetime.now() + timedelta(days=1)
+        day = tomorrow.strftime("%A").lower()
+        
+        _LOGGER.info("Updating %s schedule from calendar (workday=%s)", day, is_workday)
+        
+        if is_workday:
+            day_schedule = [
+                {"time": wake_time, "temp": 18.0},
+                {"time": "09:15", "temp": 18.5},
+                {"time": "09:30", "temp": 18.0},
+                {"time": "15:30", "temp": 18.0},
+                {"time": "16:30", "temp": 19.5},
+                {"time": "21:30", "temp": 16.0}
+            ]
+        else:
+            day_schedule = [
+                {"time": wake_time, "temp": 18.0},
+                {"time": "09:15", "temp": 18.5},
+                {"time": "09:30", "temp": 18.0},
+                {"time": "16:30", "temp": 19.5},
+                {"time": "21:30", "temp": 16.0}
+            ]
+        
+        await handle_set_day(
+            ServiceCall(
+                DOMAIN,
+                SERVICE_SET_DAY,
+                {ATTR_NODE_ID: node_id, ATTR_DAY: day, ATTR_SCHEDULE: day_schedule}
+            )
+        )
+    
+    hass.services.async_register(
+        DOMAIN, SERVICE_SET_SCHEDULE, handle_set_schedule, schema=SET_SCHEDULE_SCHEMA
+    )
+    
+    hass.services.async_register(
+        DOMAIN, SERVICE_SET_DAY, handle_set_day, schema=SET_DAY_SCHEMA
+    )
+    
+    hass.services.async_register(
+        DOMAIN, SERVICE_UPDATE_FROM_CALENDAR, handle_calendar_update, schema=CALENDAR_SCHEMA
+    )
+    
+    async def handle_refresh_token(call: ServiceCall) -> None:
+        """Manually refresh the Hive authentication token."""
+        _LOGGER.info("Manual token refresh requested")
+        success = await hass.async_add_executor_job(auth.refresh_token)
+        if success:
+            _LOGGER.info("✓ Token refresh successful")
+        else:
+            _LOGGER.error("✗ Token refresh failed")
+    
+    hass.services.async_register(DOMAIN, "refresh_token", handle_refresh_token)
+    
+    _LOGGER.info("✓ Hive Schedule Manager setup complete (Standalone v2.0)")
+    return True
