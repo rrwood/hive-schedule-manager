@@ -279,51 +279,59 @@ class HiveScheduleAPI:
     
     def get_schedule(self, node_id: str) -> dict[str, Any] | None:
         """Fetch current schedule from Hive - try multiple endpoints and methods."""
-        token = self.auth.get_id_token()
+        # Try both ID token and access token
+        id_token = self.auth.get_id_token()
+        access_token = self.auth.get_access_token()
         
-        if not token:
+        if not id_token:
             _LOGGER.error("Cannot get schedule: No auth token available")
             return None
         
-        # Set Authorization header with Bearer token
-        self.session.headers["Authorization"] = f"Bearer {token}"
+        tokens_to_try = [
+            ("ID Token", id_token),
+            ("Access Token", access_token) if access_token else None
+        ]
+        tokens_to_try = [t for t in tokens_to_try if t is not None]
         
-        # First try direct endpoints for the node_id
         endpoints_to_try = [
             f"{self.BASE_URL}/nodes/heating/{node_id}",
             f"{self.BASE_URL}/heating/{node_id}",
             f"{self.BASE_URL}/schedules/{node_id}",
         ]
         
-        for url in endpoints_to_try:
-            try:
-                _LOGGER.debug("Attempting to fetch schedule from: %s", url)
-                response = self.session.get(url, timeout=30)
-                
-                _LOGGER.info("Response status from %s: %d", url, response.status_code)
-                
-                if response.status_code == 403:
-                    _LOGGER.warning("Access forbidden (403) - token may be invalid")
+        for token_name, token in tokens_to_try:
+            _LOGGER.info("Trying with %s", token_name)
+            self.session.headers["Authorization"] = f"Bearer {token}"
+            
+            for url in endpoints_to_try:
+                try:
+                    _LOGGER.debug("Attempting to fetch schedule from: %s with %s", url, token_name)
+                    response = self.session.get(url, timeout=30)
+                    
+                    _LOGGER.info("Response status from %s: %d", url, response.status_code)
+                    
+                    if response.status_code == 403:
+                        _LOGGER.warning("Access forbidden (403)")
+                        continue
+                    
+                    if response.status_code == 404:
+                        _LOGGER.debug("Not found (404) - trying next endpoint")
+                        continue
+                    
+                    response.raise_for_status()
+                    
+                    data = response.json()
+                    _LOGGER.info("✓ Successfully fetched schedule from %s with %s", url, token_name)
+                    _LOGGER.info("Response: %s", json.dumps(data, indent=2, default=str)[:500])
+                    
+                    if isinstance(data, dict) and "schedule" in data:
+                        return data.get("schedule")
+                    
+                    return data
+                    
+                except Exception as err:
+                    _LOGGER.debug("Error fetching from %s: %s", url, err)
                     continue
-                
-                if response.status_code == 404:
-                    _LOGGER.debug("Not found (404) - trying next endpoint")
-                    continue
-                
-                response.raise_for_status()
-                
-                data = response.json()
-                _LOGGER.info("✓ Successfully fetched schedule from %s", url)
-                _LOGGER.info("Response: %s", json.dumps(data, indent=2, default=str)[:500])
-                
-                if isinstance(data, dict) and "schedule" in data:
-                    return data.get("schedule")
-                
-                return data
-                
-            except Exception as err:
-                _LOGGER.debug("Error fetching from %s: %s", url, err)
-                continue
         
         _LOGGER.error("Could not fetch schedule from any endpoint for node %s", node_id)
         return None
@@ -451,14 +459,19 @@ class HiveScheduleAPI:
     
     def update_schedule(self, node_id: str, schedule_data: dict[str, Any]) -> bool:
         """Update the heating schedule for a node."""
-        token = self.auth.get_id_token()
+        # Try both ID token and access token
+        id_token = self.auth.get_id_token()
+        access_token = self.auth.get_access_token()
         
-        if not token:
+        if not id_token:
             _LOGGER.error("Cannot update schedule: No auth token available")
             return False
         
-        # Set Authorization header with Bearer token
-        self.session.headers["Authorization"] = f"Bearer {token}"
+        tokens_to_try = [
+            ("ID Token", id_token),
+            ("Access Token", access_token) if access_token else None
+        ]
+        tokens_to_try = [t for t in tokens_to_try if t is not None]
         
         endpoints_to_try = [
             f"{self.BASE_URL}/nodes/heating/{node_id}",
@@ -466,29 +479,33 @@ class HiveScheduleAPI:
             f"{self.BASE_URL}/schedules/{node_id}",
         ]
         
-        for url in endpoints_to_try:
-            try:
-                _LOGGER.info("Attempting to update schedule at: %s", url)
-                _LOGGER.debug("Payload: %s", json.dumps(schedule_data, indent=2, default=str))
-                response = self.session.put(url, json=schedule_data, timeout=30)
-                
-                _LOGGER.info("Response status from %s: %d", url, response.status_code)
-                
-                if response.status_code == 403:
-                    _LOGGER.warning("Access forbidden (403) - token may be invalid")
+        for token_name, token in tokens_to_try:
+            _LOGGER.info("Trying update with %s", token_name)
+            self.session.headers["Authorization"] = f"Bearer {token}"
+            
+            for url in endpoints_to_try:
+                try:
+                    _LOGGER.info("Attempting to update schedule at: %s with %s", url, token_name)
+                    _LOGGER.debug("Payload: %s", json.dumps(schedule_data, indent=2, default=str))
+                    response = self.session.put(url, json=schedule_data, timeout=30)
+                    
+                    _LOGGER.info("Response status from %s: %d", url, response.status_code)
+                    
+                    if response.status_code == 403:
+                        _LOGGER.warning("Access forbidden (403)")
+                        continue
+                    
+                    if response.status_code == 404:
+                        _LOGGER.debug("Not found (404) - trying next endpoint")
+                        continue
+                    
+                    response.raise_for_status()
+                    _LOGGER.info("✓ Successfully updated schedule at %s with %s", url, token_name)
+                    return True
+                    
+                except Exception as err:
+                    _LOGGER.debug("Error updating schedule at %s: %s", url, err)
                     continue
-                
-                if response.status_code == 404:
-                    _LOGGER.debug("Not found (404) - trying next endpoint")
-                    continue
-                
-                response.raise_for_status()
-                _LOGGER.info("✓ Successfully updated schedule at %s", url)
-                return True
-                
-            except Exception as err:
-                _LOGGER.debug("Error updating schedule at %s: %s", url, err)
-                continue
         
         _LOGGER.error("Could not update schedule at any endpoint for node %s", node_id)
         return False
