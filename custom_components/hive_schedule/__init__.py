@@ -309,6 +309,20 @@ class HiveScheduleAPI:
                 
                 data = response.json()
                 _LOGGER.info("✓ Successfully fetched schedule from %s", url)
+                _LOGGER.info("Response from %s: %s", url, json.dumps(data, indent=2, default=str)[:500])
+                
+                # Write response to file
+                try:
+                    import os
+                    config_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    debug_file = os.path.join(config_dir, f"hive_schedule_{node_id}_{url.split('/')[-2]}.json")
+                    
+                    with open(debug_file, 'w') as f:
+                        json.dump(data, f, indent=2, default=str)
+                    
+                    _LOGGER.info("✓ Wrote response to: %s", debug_file)
+                except Exception as e:
+                    _LOGGER.error("Could not write response file: %s", e)
                 
                 if isinstance(data, dict) and "schedule" in data:
                     return data.get("schedule")
@@ -318,89 +332,6 @@ class HiveScheduleAPI:
             except Exception as err:
                 _LOGGER.debug("Error fetching from %s: %s", url, err)
                 continue
-        
-        # Try fetching all schedules
-        _LOGGER.info("Direct endpoints failed, attempting to fetch all schedules")
-        try:
-            schedules_url = f"{self.BASE_URL}/schedules"
-            _LOGGER.info("Fetching all schedules from: %s", schedules_url)
-            response = self.session.get(schedules_url, timeout=30)
-            response.raise_for_status()
-            
-            data = response.json()
-            _LOGGER.info("Successfully received schedules response")
-            
-            # Write to file for inspection
-            try:
-                import os
-                config_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                debug_file = os.path.join(config_dir, "hive_schedules_debug.json")
-                
-                with open(debug_file, 'w') as f:
-                    json.dump(data, f, indent=2, default=str)
-                
-                _LOGGER.info("✓ Wrote schedules response to: %s", debug_file)
-            except Exception as e:
-                _LOGGER.error("Could not write schedules debug file: %s", e)
-            
-            schedule = self._extract_schedule_from_devices(data, node_id)
-            if schedule:
-                _LOGGER.info("✓ Successfully extracted schedule for node %s from schedules endpoint", node_id)
-                return schedule
-            
-        except Exception as err:
-            _LOGGER.debug("Error fetching from /schedules endpoint: %s", err)
-        
-        # Try /nodes endpoint to list all nodes
-        _LOGGER.info("Direct endpoints failed, attempting to fetch from /nodes endpoint")
-        try:
-            nodes_url = f"{self.BASE_URL}/nodes"
-            _LOGGER.info("Fetching all nodes from: %s", nodes_url)
-            response = self.session.get(nodes_url, timeout=30)
-            response.raise_for_status()
-            
-            data = response.json()
-            _LOGGER.info("Successfully received nodes response")
-            
-            # Write to file for inspection
-            try:
-                import os
-                config_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                debug_file = os.path.join(config_dir, "hive_nodes_debug.json")
-                
-                with open(debug_file, 'w') as f:
-                    json.dump(data, f, indent=2, default=str)
-                
-                _LOGGER.info("✓ Wrote nodes response to: %s", debug_file)
-            except Exception as e:
-                _LOGGER.error("Could not write nodes debug file: %s", e)
-            
-            schedule = self._extract_schedule_from_devices(data, node_id)
-            if schedule:
-                _LOGGER.info("✓ Successfully extracted schedule for node %s from nodes endpoint", node_id)
-                return schedule
-            
-        except Exception as err:
-            _LOGGER.debug("Error fetching from /nodes endpoint: %s", err)
-        
-        # Last resort: fetch all devices
-        _LOGGER.info("Nodes endpoint failed, attempting to fetch from /devices endpoint")
-        try:
-            devices_url = f"{self.BASE_URL}/devices"
-            _LOGGER.info("Fetching devices from: %s", devices_url)
-            response = self.session.get(devices_url, timeout=30)
-            response.raise_for_status()
-            
-            data = response.json()
-            _LOGGER.info("Successfully received devices response")
-            
-            schedule = self._extract_schedule_from_devices(data, node_id)
-            if schedule:
-                _LOGGER.info("✓ Successfully extracted schedule for node %s from devices", node_id)
-                return schedule
-            
-        except Exception as err:
-            _LOGGER.error("Error fetching from /devices endpoint: %s", err)
         
         _LOGGER.error("Could not fetch schedule from any endpoint for node %s", node_id)
         return None
