@@ -286,13 +286,11 @@ class HiveScheduleAPI:
         
         self.session.headers["Authorization"] = token
         
+        # First try direct endpoints
         endpoints_to_try = [
             (f"{self.BASE_URL}/nodes/heating/{node_id}", "GET", None),
             (f"{self.BASE_URL}/nodes/{node_id}", "GET", None),
             (f"{self.BASE_URL}/heating/{node_id}", "GET", None),
-            (f"{self.BASE_URL}/nodes/heating/{node_id}", "POST", {}),
-            (f"{self.BASE_URL}/nodes/{node_id}", "POST", {}),
-            (f"{self.BASE_URL}/heating/{node_id}", "POST", {}),
         ]
         
         for url, method, body in endpoints_to_try:
@@ -312,18 +310,115 @@ class HiveScheduleAPI:
                 
                 data = response.json()
                 _LOGGER.info("✓ Successfully fetched schedule from %s", url)
-                _LOGGER.debug("Response keys: %s", list(data.keys()))
-                _LOGGER.debug("Full response: %s", json.dumps(data, indent=2, default=str)[:1000])
                 
-                return data
+                if "schedule" in data:
+                    return data.get("schedule")
                 
             except Exception as err:
                 _LOGGER.debug("Error fetching from %s: %s", url, err)
                 continue
         
-        _LOGGER.error("Could not fetch schedule from any endpoint")
+        # If direct endpoints fail, fetch all devices and extract schedule for this node
+        _LOGGER.debug("Direct endpoints failed, trying to extract from all devices")
+        try:
+            devices_url = f"{self.BASE_URL}/devices"
+            response = self.session.get(devices_url, timeout=30)
+            response.raise_for_status()
+            
+            data = response.json()
+            _LOGGER.debug("Fetched devices, structure keys: %s", list(data.keys()))
+            
+            # Try to find the node in various structures
+            schedule = self._extract_schedule_from_devices(data, node_id)
+            if schedule:
+                _LOGGER.info("✓ Successfully extracted schedule for node %s from devices", node_id)
+                return schedule
+            
+        except Exception as err:
+            _LOGGER.debug("Error fetching devices: %s", err)
+        
+        _LOGGER.error("Could not fetch schedule from any endpoint for node %s", node_id)
         return None
     
+    def _extract_schedule_from_devices(self, devices_data: dict[str, Any], node_id: str) -> dict[str, Any] | None:
+        """Extract schedule for a specific node from the devices response."""
+        try:
+            # Log the full structure for debugging
+            _LOGGER.debug("Devices response keys: %s", list(devices_data.keys()))
+            _LOGGER.debug("Full devices response: %s", json.dumps(devices_data, indent=2, default=str)[:2000])
+            
+            # Try various possible structures
+            # Structure 1: devices -> direct list
+            if isinstance(devices_data, list):
+                for device in devices_data:
+                    if device.get("id") == node_id and "schedule" in device:
+                        return device.get("schedule")
+            
+            # Structure 2: devices -> nested object
+            if "devices" in devices_data:
+                devices_list = devices_data.get("devices", [])
+                if isinstance(devices_list, list):
+                    for device in devices_list:
+                        if device.get("id") == node_id and "schedule" in device:
+                            return device.get("schedule")
+                elif isinstance(devices_list, dict):
+                    device = devices_list.get(node_id)
+                    if device and "schedule" in device:
+                        return device.get("schedule")
+            
+            # Structure 3: nodes -> direct list
+            if "nodes" in devices_data:
+                nodes_list = devices_data.get("nodes", [])
+                if isinstance(nodes_list, list):
+                    for node in nodes_list:
+                        if node.get("id") == node_id and "schedule" in node:
+                            return node.get("schedule")
+                elif isinstance(nodes_list, dict):
+                    node = nodes_list.get(node_id)
+                    if node and "schedule" in node:
+                        return node.get("schedule")
+            
+            # Structure 4: heating -> nested
+            if "heating" in devices_data:
+                heating = devices_data.get("heating", {})
+                if isinstance(heating, dict):
+                    # Try as direct dict
+                    if "schedule" in heating:
+                        return heating.get("schedule")
+                    # Try finding node in heating
+                    if node_id in heating:
+                        node = heating.get(node_id, {})
+                        if "schedule" in node:
+                            return node.get("schedule")
+            
+            # Structure 5: Walk through entire structure looking for node_id
+            def find_schedule(obj, target_id):
+                """Recursively search for target node and its schedule."""
+                if isinstance(obj, dict):
+                    if obj.get("id") == target_id and "schedule" in obj:
+                        return obj.get("schedule")
+                    for value in obj.values():
+                        result = find_schedule(value, target_id)
+                        if result:
+                            return result
+                elif isinstance(obj, list):
+                    for item in obj:
+                        result = find_schedule(item, target_id)
+                        if result:
+                            return result
+                return None
+            
+            schedule = find_schedule(devices_data, node_id)
+            if schedule:
+                return schedule
+            
+            _LOGGER.warning("Could not find schedule for node %s in devices response", node_id)
+            return None
+            
+        except Exception as err:
+            _LOGGER.error("Error extracting schedule from devices: %s", err)
+            return None
+
     def get_all_devices(self) -> dict[str, Any] | None:
         """Fetch all devices/nodes to get complete state including schedules."""
         token = self.auth.get_id_token()
