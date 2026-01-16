@@ -481,6 +481,7 @@ class HiveScheduleAPI:
         
         for token_name, token in tokens_to_try:
             _LOGGER.info("Trying update with %s", token_name)
+            _LOGGER.debug("Token (first 50 chars): %s...", token[:50] if token else "None")
             self.session.headers["Authorization"] = f"Bearer {token}"
             
             for url in endpoints_to_try:
@@ -490,6 +491,10 @@ class HiveScheduleAPI:
                     response = self.session.put(url, json=schedule_data, timeout=30)
                     
                     _LOGGER.info("Response status from %s: %d", url, response.status_code)
+                    _LOGGER.debug("Response headers: %s", dict(response.headers))
+                    
+                    if response.text:
+                        _LOGGER.debug("Response body: %s", response.text[:500])
                     
                     if response.status_code == 403:
                         _LOGGER.warning("Access forbidden (403)")
