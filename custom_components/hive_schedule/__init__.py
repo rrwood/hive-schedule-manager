@@ -146,12 +146,36 @@ class HiveAuth:
     
     def verify_mfa_code(self, mfa_code: str) -> bool:
         """Verify MFA code and complete authentication."""
-        if not self._mfa_required or not self._mfa_session:
-            _LOGGER.error("No MFA session available - authenticate first")
+        # Clean the code - remove spaces, dashes, etc.
+        mfa_code = mfa_code.strip().replace(' ', '').replace('-', '')
+        
+        if not mfa_code.isdigit() or len(mfa_code) != 6:
+            _LOGGER.error("Invalid MFA code format. Expected 6 digits, got: '%s'", mfa_code)
+            return False
+        
+        if not self._mfa_required:
+            _LOGGER.warning("MFA not required - you may already be authenticated")
+            return False
+        
+        if not self._mfa_session or not self._mfa_session_token:
+            _LOGGER.error("No MFA session available - the session may have expired")
+            _LOGGER.info("Attempting to re-authenticate to get a fresh MFA session...")
+            
+            # Re-authenticate to get a fresh MFA challenge
+            if not self.authenticate():
+                _LOGGER.error("Re-authentication failed")
+                return False
+            
+            if not self._mfa_required:
+                _LOGGER.info("✓ Re-authentication succeeded without MFA")
+                return True
+            
+            _LOGGER.info("Got fresh MFA session, please try entering your code again")
             return False
         
         try:
-            _LOGGER.info("Verifying MFA code...")
+            _LOGGER.info("Verifying MFA code: %s", mfa_code)
+            _LOGGER.debug("Session token exists: %s", bool(self._mfa_session_token))
             
             self._mfa_session.respond_to_sms_mfa_challenge(
                 mfa_code,
@@ -174,7 +198,16 @@ class HiveAuth:
             return True
             
         except Exception as e:
-            _LOGGER.error("MFA verification failed: %s", e)
+            error_msg = str(e)
+            _LOGGER.error("MFA verification failed: %s", error_msg)
+            
+            if "CodeMismatchException" in error_msg or "Invalid code" in error_msg:
+                _LOGGER.error("The code you entered is incorrect or has expired")
+                _LOGGER.info("Request a new code and try again, or restart HA to get a fresh session")
+            elif "auth state" in error_msg.lower():
+                _LOGGER.error("The MFA session has expired")
+                _LOGGER.info("Restart Home Assistant to get a fresh MFA session")
+            
             return False
     
     def is_mfa_required(self) -> bool:
@@ -590,6 +623,23 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
             _LOGGER.error("Traceback: %s", traceback.format_exc())
     
     hass.services.async_register(DOMAIN, "diagnose_hive_api", handle_diagnose_hive_api)
+    
+    # Service to re-trigger MFA
+    async def handle_request_mfa(call: ServiceCall) -> None:
+        """Re-authenticate to get a fresh MFA code."""
+        _LOGGER.info("Re-authentication requested to get fresh MFA session")
+        
+        success = await hass.async_add_executor_job(auth.authenticate)
+        
+        if not success:
+            if auth.is_mfa_required():
+                _LOGGER.info("✓ MFA code sent - check your SMS and call verify_mfa_code")
+            else:
+                raise HomeAssistantError("Authentication failed - check your credentials")
+        else:
+            _LOGGER.info("✓ Authentication successful without MFA")
+    
+    hass.services.async_register(DOMAIN, "request_new_mfa", handle_request_mfa)
     
     _LOGGER.info("✓ Hive Schedule Manager setup complete (Hybrid v2.1)")
     _LOGGER.info("This version uses the official Hive integration's API client with your own authentication")

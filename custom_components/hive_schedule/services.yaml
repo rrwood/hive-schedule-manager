@@ -87,3 +87,8 @@ diagnose_hive_api:
   name: Diagnose Hive API
   description: Show what methods are available in the Hive integration (for debugging)
   fields: {}
+
+request_new_mfa:
+  name: Request New MFA Code
+  description: Re-authenticate to get a fresh MFA code if the session expired
+  fields: {}
