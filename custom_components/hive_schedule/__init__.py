@@ -10,6 +10,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 import json
+import traceback
 
 import voluptuous as vol
 import requests
@@ -288,19 +289,15 @@ class HiveScheduleAPI:
         
         # First try direct endpoints
         endpoints_to_try = [
-            (f"{self.BASE_URL}/nodes/heating/{node_id}", "GET", None),
-            (f"{self.BASE_URL}/nodes/{node_id}", "GET", None),
-            (f"{self.BASE_URL}/heating/{node_id}", "GET", None),
+            (f"{self.BASE_URL}/nodes/heating/{node_id}", "GET"),
+            (f"{self.BASE_URL}/nodes/{node_id}", "GET"),
+            (f"{self.BASE_URL}/heating/{node_id}", "GET"),
         ]
         
-        for url, method, body in endpoints_to_try:
+        for url, method in endpoints_to_try:
             try:
                 _LOGGER.debug("Attempting to fetch schedule: %s %s", method, url)
-                
-                if method == "GET":
-                    response = self.session.get(url, timeout=30)
-                else:
-                    response = self.session.post(url, json=body, timeout=30)
+                response = self.session.get(url, timeout=30)
                 
                 if response.status_code in [403, 404]:
                     _LOGGER.debug("Status %s - trying next endpoint", response.status_code)
@@ -319,170 +316,113 @@ class HiveScheduleAPI:
                 continue
         
         # If direct endpoints fail, fetch all devices and extract schedule for this node
-        _LOGGER.debug("Direct endpoints failed, trying to extract from all devices")
+        _LOGGER.info("Direct endpoints failed, attempting to fetch from /devices endpoint")
         try:
             devices_url = f"{self.BASE_URL}/devices"
+            _LOGGER.info("Fetching devices from: %s", devices_url)
             response = self.session.get(devices_url, timeout=30)
             response.raise_for_status()
             
             data = response.json()
-            _LOGGER.debug("Fetched devices, structure keys: %s", list(data.keys()))
+            _LOGGER.info("Successfully received devices response, attempting to extract schedule")
             
             # Try to find the node in various structures
             schedule = self._extract_schedule_from_devices(data, node_id)
             if schedule:
                 _LOGGER.info("✓ Successfully extracted schedule for node %s from devices", node_id)
                 return schedule
+            else:
+                _LOGGER.warning("_extract_schedule_from_devices returned None for node %s", node_id)
             
         except Exception as err:
-            _LOGGER.debug("Error fetching devices: %s", err)
+            _LOGGER.error("Error fetching from /devices endpoint: %s", err)
+            _LOGGER.error("Traceback: %s", traceback.format_exc())
         
         _LOGGER.error("Could not fetch schedule from any endpoint for node %s", node_id)
         return None
     
     def _extract_schedule_from_devices(self, devices_data: dict[str, Any], node_id: str) -> dict[str, Any] | None:
         """Extract schedule for a specific node from the devices response."""
+        _LOGGER.info("=== STARTING SCHEDULE EXTRACTION ===")
+        _LOGGER.info("Looking for node_id: %s", node_id)
+        
         try:
             # Log the FULL structure for debugging
             _LOGGER.info("=== DEVICES RESPONSE DEBUG ===")
             _LOGGER.info("Response type: %s", type(devices_data).__name__)
-            _LOGGER.info("Response keys: %s", list(devices_data.keys()) if isinstance(devices_data, dict) else "N/A (not a dict)")
-            _LOGGER.info("Full response:\n%s", json.dumps(devices_data, indent=2, default=str))
+            
+            if isinstance(devices_data, dict):
+                _LOGGER.info("Response keys: %s", list(devices_data.keys()))
+            else:
+                _LOGGER.info("Response is not a dict, it's: %s", type(devices_data))
+            
+            response_str = json.dumps(devices_data, indent=2, default=str)
+            _LOGGER.info("Full response length: %d chars", len(response_str))
+            _LOGGER.info("Full response:\n%s", response_str)
             _LOGGER.info("=== END DEVICES RESPONSE ===")
             
-            # Try various possible structures
-            # Structure 1: devices -> direct list
+            # Structure 1: Check if it's a list
             if isinstance(devices_data, list):
-                _LOGGER.debug("Checking structure 1: direct list")
-                for device in devices_data:
-                    if device.get("id") == node_id and "schedule" in device:
-                        _LOGGER.info("Found schedule in list item")
+                _LOGGER.info("Response is a list with %d items", len(devices_data))
+                for idx, device in enumerate(devices_data):
+                    device_id = device.get("id") if isinstance(device, dict) else "N/A"
+                    has_schedule = "schedule" in device if isinstance(device, dict) else False
+                    _LOGGER.info("Item %d: id=%s, has_schedule=%s", idx, device_id, has_schedule)
+                    if device_id == node_id and has_schedule:
+                        _LOGGER.info("✓ Found schedule in list item %d", idx)
                         return device.get("schedule")
             
-            # Structure 2: devices -> nested object
-            if "devices" in devices_data:
-                _LOGGER.debug("Checking structure 2: devices key")
+            # Structure 2: Check for 'devices' key
+            if isinstance(devices_data, dict) and "devices" in devices_data:
+                _LOGGER.info("Found 'devices' key in response")
                 devices_list = devices_data.get("devices", [])
+                _LOGGER.info("devices is a: %s with %d items", type(devices_list).__name__, len(devices_list) if isinstance(devices_list, (list, dict)) else "N/A")
+                
                 if isinstance(devices_list, list):
-                    for device in devices_list:
-                        if device.get("id") == node_id and "schedule" in device:
-                            _LOGGER.info("Found schedule in devices list")
+                    for idx, device in enumerate(devices_list):
+                        device_id = device.get("id") if isinstance(device, dict) else "N/A"
+                        _LOGGER.info("Device %d in devices list: id=%s", idx, device_id)
+                        if device_id == node_id and "schedule" in device:
+                            _LOGGER.info("✓ Found schedule in devices list")
                             return device.get("schedule")
-                elif isinstance(devices_list, dict):
-                    device = devices_list.get(node_id)
-                    if device and "schedule" in device:
-                        _LOGGER.info("Found schedule in devices dict")
-                        return device.get("schedule")
             
-            # Structure 3: nodes -> direct list
-            if "nodes" in devices_data:
-                _LOGGER.debug("Checking structure 3: nodes key")
+            # Structure 3: Check for 'nodes' key
+            if isinstance(devices_data, dict) and "nodes" in devices_data:
+                _LOGGER.info("Found 'nodes' key in response")
                 nodes_list = devices_data.get("nodes", [])
+                _LOGGER.info("nodes is a: %s", type(nodes_list).__name__)
+                
                 if isinstance(nodes_list, list):
-                    for node in nodes_list:
-                        if node.get("id") == node_id and "schedule" in node:
-                            _LOGGER.info("Found schedule in nodes list")
+                    for idx, node in enumerate(nodes_list):
+                        node_id_found = node.get("id") if isinstance(node, dict) else "N/A"
+                        _LOGGER.info("Node %d in nodes list: id=%s", idx, node_id_found)
+                        if node_id_found == node_id and "schedule" in node:
+                            _LOGGER.info("✓ Found schedule in nodes list")
                             return node.get("schedule")
-                elif isinstance(nodes_list, dict):
-                    node = nodes_list.get(node_id)
-                    if node and "schedule" in node:
-                        _LOGGER.info("Found schedule in nodes dict")
-                        return node.get("schedule")
             
-            # Structure 4: heating -> nested
-            if "heating" in devices_data:
-                _LOGGER.debug("Checking structure 4: heating key")
+            # Structure 4: Check for 'heating' key
+            if isinstance(devices_data, dict) and "heating" in devices_data:
+                _LOGGER.info("Found 'heating' key in response")
                 heating = devices_data.get("heating", {})
+                _LOGGER.info("heating is a: %s", type(heating).__name__)
+                
                 if isinstance(heating, dict):
                     if "schedule" in heating:
-                        _LOGGER.info("Found schedule directly in heating")
+                        _LOGGER.info("✓ Found schedule directly in heating key")
                         return heating.get("schedule")
                     if node_id in heating:
                         node = heating.get(node_id, {})
                         if "schedule" in node:
-                            _LOGGER.info("Found schedule in heating[node_id]")
+                            _LOGGER.info("✓ Found schedule in heating[%s]", node_id)
                             return node.get("schedule")
             
-            # Structure 5: Walk through entire structure looking for node_id
-            _LOGGER.debug("Checking structure 5: recursive search for node_id")
-            def find_schedule(obj, target_id, depth=0):
-                """Recursively search for target node and its schedule."""
-                if depth > 10:  # Prevent infinite recursion
-                    return None
-                    
-                if isinstance(obj, dict):
-                    if obj.get("id") == target_id:
-                        _LOGGER.debug("Found node with id=%s at depth %d", target_id, depth)
-                        _LOGGER.debug("Node content: %s", json.dumps(obj, indent=2, default=str)[:500])
-                        if "schedule" in obj:
-                            _LOGGER.info("Found schedule in node dict")
-                            return obj.get("schedule")
-                    
-                    for key, value in obj.items():
-                        result = find_schedule(value, target_id, depth + 1)
-                        if result:
-                            return result
-                elif isinstance(obj, list):
-                    for item in obj:
-                        result = find_schedule(item, target_id, depth + 1)
-                        if result:
-                            return result
-                return None
-            
-            schedule = find_schedule(devices_data, node_id)
-            if schedule:
-                return schedule
-            
-            _LOGGER.error("Could not find schedule for node %s in devices response", node_id)
-            _LOGGER.error("Looking for node_id: %s", node_id)
+            _LOGGER.warning("Could not find schedule for node %s using standard structures", node_id)
             return None
             
         except Exception as err:
             _LOGGER.error("Error extracting schedule from devices: %s", err)
-            _LOGGER.exception("Full exception:")
+            _LOGGER.error("Traceback: %s", traceback.format_exc())
             return None
-
-    def get_all_devices(self) -> dict[str, Any] | None:
-        """Fetch all devices/nodes to get complete state including schedules."""
-        token = self.auth.get_id_token()
-        
-        if not token:
-            _LOGGER.error("Cannot get devices: No auth token available")
-            return None
-        
-        self.session.headers["Authorization"] = token
-        
-        endpoints_to_try = [
-            f"{self.BASE_URL}/nodes",
-            f"{self.BASE_URL}/devices",
-            f"{self.BASE_URL}/home",
-            f"{self.BASE_URL}/user/devices",
-        ]
-        
-        for url in endpoints_to_try:
-            try:
-                _LOGGER.debug("Attempting to fetch devices from: %s", url)
-                response = self.session.get(url, timeout=30)
-                
-                if response.status_code in [403, 404]:
-                    _LOGGER.debug("Status %s for %s - trying next", response.status_code, url)
-                    continue
-                
-                response.raise_for_status()
-                
-                data = response.json()
-                _LOGGER.info("✓ Successfully fetched devices from %s", url)
-                _LOGGER.debug("Response keys: %s", list(data.keys()))
-                _LOGGER.debug("Full response: %s", json.dumps(data, indent=2, default=str)[:1000])
-                
-                return data
-                    
-            except Exception as err:
-                _LOGGER.debug("Error fetching from %s: %s", url, err)
-                continue
-        
-        _LOGGER.error("Could not fetch devices from any endpoint")
-        return None
     
     def update_schedule(self, node_id: str, schedule_data: dict[str, Any]) -> bool:
         """Send schedule update to Hive."""
@@ -628,12 +568,6 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         current_schedule = await hass.async_add_executor_job(api.get_schedule, node_id)
         
         if current_schedule is None:
-            _LOGGER.warning("Could not fetch schedule directly, trying to get all devices")
-            all_devices = await hass.async_add_executor_job(api.get_all_devices)
-            if all_devices:
-                _LOGGER.debug("Got devices response, looking for node %s", node_id)
-                _LOGGER.debug("Full devices response: %s", json.dumps(all_devices, indent=2, default=str)[:2000])
-            
             _LOGGER.error("Could not fetch current schedule - cannot safely update single day")
             raise HomeAssistantError(
                 "Unable to fetch current schedule. Please use set_heating_schedule to set complete schedule."
