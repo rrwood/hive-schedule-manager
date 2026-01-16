@@ -65,3 +65,20 @@ update_from_calendar:
       required: false
       selector:
         time:
+
+verify_mfa_code:
+  name: Verify MFA Code
+  description: Submit your 2FA/MFA code to complete authentication
+  fields:
+    mfa_code:
+      name: MFA Code
+      description: The 6-digit code from your SMS message
+      required: true
+      example: "123456"
+      selector:
+        text:
+
+refresh_token:
+  name: Refresh Token
+  description: Manually refresh the authentication token
+  fields: {}
