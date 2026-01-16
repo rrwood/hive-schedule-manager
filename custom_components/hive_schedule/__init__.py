@@ -349,22 +349,27 @@ class HiveScheduleAPI:
             response.raise_for_status()
             
             data = response.json()
+            _LOGGER.debug("Full response keys: %s", data.keys())
+            _LOGGER.debug("Full response: %s", json.dumps(data, indent=2, default=str))
+            
             if "schedule" in data:
                 schedule = data.get("schedule", {})
-                _LOGGER.debug("✓ Successfully fetched schedule for node %s", node_id)
-                schedule_structure = {k: f"{type(v).__name__}(len={len(v) if isinstance(v, list) else 'N/A'})" for k, v in schedule.items()}
-                _LOGGER.debug("Schedule structure: %s", schedule_structure)
-                if schedule:
-                    # Log first day's schedule as example
-                    first_day = next(iter(schedule.items()), None)
-                    if first_day:
-                        _LOGGER.debug("Example %s schedule: %s", first_day[0], first_day[1][:1] if isinstance(first_day[1], list) else first_day[1])
+                _LOGGER.info("✓ Successfully fetched schedule for node %s", node_id)
+                _LOGGER.info("Schedule keys: %s", list(schedule.keys()))
+                
+                # Log each day's schedule in detail
+                for day, day_data in schedule.items():
+                    _LOGGER.info("%s schedule type: %s", day, type(day_data).__name__)
+                    _LOGGER.info("%s schedule: %s", day, json.dumps(day_data, indent=2, default=str))
+                
                 return schedule
             else:
                 _LOGGER.warning("No schedule data in response")
+                _LOGGER.warning("Available keys: %s", list(data.keys()))
                 return None
                 
         except requests.exceptions.HTTPError as err:
+            _LOGGER.error("HTTP error %s fetching schedule: %s", err.response.status_code, err)
             if err.response.status_code == 401:
                 _LOGGER.error("Authentication failed (401) when fetching schedule")
                 if self.auth.refresh_token():
@@ -378,7 +383,6 @@ class HiveScheduleAPI:
                             return data.get("schedule", {})
                     except Exception as retry_err:
                         _LOGGER.error("Retry failed: %s", retry_err)
-            _LOGGER.error("HTTP error fetching schedule: %s", err)
             return None
         except Exception as err:
             _LOGGER.error("Error fetching schedule: %s", err)
@@ -541,23 +545,16 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         day_schedule = call.data[ATTR_SCHEDULE]
         
         _LOGGER.info("Setting schedule for %s on node %s", day, node_id)
+        _LOGGER.debug("New schedule for %s: %s", day, day_schedule)
         
         # Fetch current schedule to preserve other days
         current_schedule = await hass.async_add_executor_job(api.get_schedule, node_id)
         
         if current_schedule is None:
-            _LOGGER.warning("Could not fetch current schedule, using defaults for other days")
-            # Default schedule for other days if we can't fetch current
-            default_schedule = [
-                {"time": "06:30", "temp": 18.0},
-                {"time": "08:00", "temp": 16.0},
-                {"time": "16:30", "temp": 19.5},
-                {"time": "21:30", "temp": 16.0}
-            ]
-            current_schedule = {
-                d: [api.build_schedule_entry(entry["time"], entry["temp"]) for entry in default_schedule]
-                for d in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-            }
+            _LOGGER.error("Could not fetch current schedule - cannot safely update single day")
+            raise HomeAssistantError(
+                "Unable to fetch current schedule. Please use set_heating_schedule to set complete schedule."
+            )
         
         schedule_data: dict[str, Any] = {"schedule": {}}
         
@@ -568,19 +565,17 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
                     api.build_schedule_entry(entry["time"], entry["temp"])
                     for entry in day_schedule
                 ]
-                _LOGGER.debug("Updated %s schedule: %s", d, schedule_data["schedule"][d])
+                _LOGGER.info("Updated %s: %s", d, json.dumps(schedule_data["schedule"][d], indent=2))
             else:
                 # Preserve existing schedule for other days
                 if d in current_schedule:
                     schedule_data["schedule"][d] = current_schedule[d]
-                    _LOGGER.debug("Preserved %s schedule from current settings", d)
+                    _LOGGER.info("Preserved %s: %s", d, json.dumps(current_schedule[d], indent=2, default=str))
                 else:
-                    # Fallback to default if day not found
-                    _LOGGER.warning("Day %s not found in current schedule, using default", d)
-                    schedule_data["schedule"][d] = [
-                        api.build_schedule_entry("06:30", 18.0)
-                    ]
+                    _LOGGER.error("Day %s missing from fetched schedule!", d)
+                    raise HomeAssistantError(f"Schedule for {d} missing in response")
         
+        _LOGGER.info("Complete schedule to send: %s", json.dumps(schedule_data, indent=2, default=str))
         await hass.async_add_executor_job(api.update_schedule, node_id, schedule_data)
     
     async def handle_calendar_update(call: ServiceCall) -> None:
