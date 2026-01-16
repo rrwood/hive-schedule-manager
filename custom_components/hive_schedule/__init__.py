@@ -327,46 +327,38 @@ class HiveScheduleAPI:
             if hasattr(hive_session, 'heating'):
                 heating_module = hive_session.heating
                 
-                # Try to find a method to update the schedule
-                # The apyhiveapi might have methods like set_schedule, update_schedule, etc.
+                # Log available methods
                 _LOGGER.debug("Heating module methods: %s", [m for m in dir(heating_module) if not m.startswith('_')])
                 
-                # Look for schedule-related methods
-                for method_name in ['setSchedule', 'set_schedule', 'updateSchedule', 'update_schedule', 'put_schedule']:
-                    if hasattr(heating_module, method_name):
-                        method = getattr(heating_module, method_name)
-                        _LOGGER.info("Found method: %s", method_name)
-                        
-                        try:
-                            # Try calling with different parameter combinations
-                            result = await self.hass.async_add_executor_job(
-                                method, node_id, schedule_data
-                            )
-                            _LOGGER.info("✓ Successfully updated Hive schedule using %s", method_name)
-                            return True
-                        except Exception as e:
-                            _LOGGER.debug("Method %s failed: %s", method_name, e)
-                            continue
+                # The heating module doesn't have schedule update methods
+                # We need to use the API module instead
             
-            # Fallback: Use the Hive API's low-level request method
+            # Use the Hive API's request method (it's async!)
             if hasattr(hive_session, 'api') and hasattr(hive_session.api, 'request'):
                 api = hive_session.api
                 
-                _LOGGER.info("Attempting to use Hive's api.request method")
+                _LOGGER.info("Attempting to use Hive's api.request method (async)")
                 
-                # The apyhiveapi's request method should handle auth internally
-                result = await self.hass.async_add_executor_job(
-                    api.request,
-                    'PUT',
-                    f'https://beekeeper-uk.hivehome.com/1.0/nodes/heating/{node_id}',
-                    schedule_data
-                )
-                
-                if result:
-                    _LOGGER.info("✓ Successfully updated Hive schedule")
-                    return True
-                else:
-                    _LOGGER.error("API request returned no result")
+                # The apyhiveapi's request method is async and handles auth internally
+                try:
+                    result = await api.request(
+                        'PUT',
+                        f'https://beekeeper-uk.hivehome.com/1.0/nodes/heating/{node_id}',
+                        schedule_data
+                    )
+                    
+                    _LOGGER.debug("API request result: %s", result)
+                    
+                    if result:
+                        _LOGGER.info("✓ Successfully updated Hive schedule")
+                        return True
+                    else:
+                        _LOGGER.error("API request returned no result or False")
+                        return False
+                except Exception as e:
+                    _LOGGER.error("API request failed: %s", e)
+                    import traceback
+                    _LOGGER.debug("Traceback: %s", traceback.format_exc())
                     return False
             
             # Last resort: Check if there's a working authenticated session we can use
