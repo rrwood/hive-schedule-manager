@@ -461,4 +461,107 @@ class HiveScheduleAPI:
         except Exception as e:
             _LOGGER.error("Error extracting schedule from devices: %s", e)
             return None
-           
+    
+    def _find_schedule_in_object(self, obj: Any, node_id: str, depth: int = 0, path: str = "") -> dict[str, Any] | None:
+        """Recursively search for schedule in nested object."""
+        if depth > 10:
+            return None
+        
+        if isinstance(obj, dict):
+            if obj.get("id") == node_id and "schedule" in obj:
+                _LOGGER.info("✓ Found schedule at %s", path)
+                return obj.get("schedule")
+            
+            for key, value in obj.items():
+                result = self._find_schedule_in_object(value, node_id, depth + 1, f"{path}.{key}")
+                if result:
+                    return result
+        
+        elif isinstance(obj, list):
+            for idx, item in enumerate(obj):
+                result = self._find_schedule_in_object(item, node_id, depth + 1, f"{path}[{idx}]")
+                if result:
+                    return result
+        
+        return None
+    
+    def set_schedule(self, node_id: str, schedule: dict[str, Any]) -> bool:
+        """Set the heating schedule for a node."""
+        try:
+            token = self.auth.get_id_token()
+            if not token:
+                _LOGGER.error("Cannot set schedule: No auth token available")
+                return False
+            
+            self.session.headers["Authorization"] = token
+            
+            url = f"{self.BASE_URL}/nodes/heating/{node_id}"
+            payload = {"schedule": schedule}
+            
+            _LOGGER.debug("Setting schedule for node %s", node_id)
+            response = self.session.put(url, json=payload, timeout=30)
+            response.raise_for_status()
+            
+            _LOGGER.info("✓ Successfully set schedule for node %s", node_id)
+            return True
+        
+        except Exception as e:
+            _LOGGER.error("Failed to set schedule: %s", e)
+            return False
+
+
+async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
+    """Set up the Hive Schedule integration."""
+    try:
+        hive_config = config.get(DOMAIN, {})
+        username = hive_config.get(CONF_USERNAME)
+        password = hive_config.get(CONF_PASSWORD)
+        scan_interval = hive_config.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+        
+        if not username or not password:
+            _LOGGER.error("Username and password are required")
+            return False
+        
+        # Initialize auth
+        auth = HiveAuth(username, password)
+        api = HiveScheduleAPI(auth)
+        
+        # Store in hass data
+        hass.data[DOMAIN] = {
+            "auth": auth,
+            "api": api,
+        }
+        
+        # Register services
+        async def handle_set_schedule(call: ServiceCall) -> None:
+            """Handle set schedule service call."""
+            try:
+                node_id = call.data.get(ATTR_NODE_ID)
+                schedule = call.data.get(ATTR_SCHEDULE)
+                
+                if not api.set_schedule(node_id, schedule):
+                    _LOGGER.error("Failed to set schedule")
+            except Exception as e:
+                _LOGGER.error("Error handling set_schedule: %s", e)
+        
+        async def handle_verify_mfa(call: ServiceCall) -> None:
+            """Handle MFA verification service call."""
+            try:
+                code = call.data.get(ATTR_MFA_CODE)
+                if auth.verify_mfa(code):
+                    _LOGGER.info("MFA verification successful")
+                else:
+                    _LOGGER.error("MFA verification failed")
+            except Exception as e:
+                _LOGGER.error("Error handling verify_mfa: %s", e)
+        
+        hass.services.async_register(DOMAIN, SERVICE_SET_SCHEDULE, handle_set_schedule, SET_SCHEDULE_SCHEMA)
+        hass.services.async_register(DOMAIN, SERVICE_VERIFY_MFA, handle_verify_mfa, MFA_SCHEMA)
+        
+        _LOGGER.info("✓ Hive Schedule integration setup complete")
+        return True
+    
+    except Exception as e:
+        _LOGGER.error("Failed to set up Hive Schedule integration: %s", e)
+        traceback.print_exc()
+        return False
