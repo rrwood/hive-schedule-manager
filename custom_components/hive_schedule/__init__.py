@@ -1,8 +1,8 @@
 """
 Hive Schedule Manager Integration for Home Assistant
 Enables programmatic control of British Gas Hive heating schedules.
-
-For documentation, visit: https://github.com/YOUR_USERNAME/hive-schedule-manager
+v4
+For documentation, visit: https://github.com/rrwood/hive-schedule-manager
 """
 from __future__ import annotations
 
@@ -382,6 +382,18 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     hass.services.async_register(
         DOMAIN, SERVICE_UPDATE_FROM_CALENDAR, handle_calendar_update, schema=CALENDAR_SCHEMA
     )
+    
+    # DEBUG SERVICE - Remove after finding token
+    async def handle_debug_hive(call: ServiceCall) -> None:
+        """Debug service to inspect Hive data structure."""
+        _LOGGER.info("=== MANUAL DEBUG TRIGGERED ===")
+        token = await hass.async_add_executor_job(get_hive_auth_token)
+        if token:
+            _LOGGER.info("Token found! Length: %d", len(token))
+        else:
+            _LOGGER.error("Token NOT found")
+    
+    hass.services.async_register(DOMAIN, "debug_hive_data", handle_debug_hive)
     
     _LOGGER.info("Hive Schedule Manager setup complete")
     return True
