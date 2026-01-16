@@ -24,14 +24,6 @@ from homeassistant.exceptions import HomeAssistantError
 
 _LOGGER = logging.getLogger(__name__)
 
-# Try to import diagnostics
-try:
-    from .simple_diagnostics import create_simple_diagnostic_service
-    SIMPLE_DIAGNOSTICS_AVAILABLE = True
-except ImportError:
-    SIMPLE_DIAGNOSTICS_AVAILABLE = False
-    _LOGGER.warning("Simple diagnostics not available")
-
 DOMAIN = "hive_schedule"
 DEFAULT_SCAN_INTERVAL = timedelta(hours=1)
 
@@ -462,36 +454,66 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     # DEBUG SERVICE
     async def handle_debug_hive(call: ServiceCall) -> None:
         """Debug service to inspect Hive data structure."""
-        _LOGGER.info("=== MANUAL DEBUG TRIGGERED ===")
+        _LOGGER.warning("=" * 80)
+        _LOGGER.warning("MANUAL DEBUG TRIGGERED")
+        _LOGGER.warning("=" * 80)
+        
         token = await hass.async_add_executor_job(get_hive_auth_token)
         if token:
-            _LOGGER.info("✓ Token found! Length: %d", len(token))
+            _LOGGER.warning("✓ Token found! Length: %d", len(token))
         else:
             _LOGGER.error("✗ Token NOT found")
             
             # Additional debugging
-            _LOGGER.info("=== DETAILED DEBUG INFO ===")
+            _LOGGER.warning("=" * 80)
+            _LOGGER.warning("DETAILED DEBUG INFO")
+            _LOGGER.warning("=" * 80)
             hive_entries = hass.config_entries.async_entries("hive")
-            _LOGGER.info("Number of Hive entries: %d", len(hive_entries))
+            _LOGGER.warning("Number of Hive entries: %d", len(hive_entries))
             
-            for entry in hive_entries:
-                _LOGGER.info("Entry ID: %s", entry.entry_id)
-                _LOGGER.info("  State: %s", entry.state)
-                _LOGGER.info("  Has runtime_data: %s", hasattr(entry, 'runtime_data') and entry.runtime_data is not None)
+            for idx, entry in enumerate(hive_entries):
+                _LOGGER.warning("")
+                _LOGGER.warning("Entry #%d:", idx + 1)
+                _LOGGER.warning("  Entry ID: %s", entry.entry_id)
+                _LOGGER.warning("  State: %s", entry.state)
+                _LOGGER.warning("  Has runtime_data: %s", hasattr(entry, 'runtime_data') and entry.runtime_data is not None)
                 
                 if hasattr(entry, 'runtime_data') and entry.runtime_data:
                     runtime = entry.runtime_data
-                    _LOGGER.info("  Runtime type: %s", type(runtime).__name__)
+                    _LOGGER.warning("  Runtime type: %s", type(runtime).__name__)
+                    _LOGGER.warning("  Runtime module: %s", type(runtime).__module__)
                     if hasattr(runtime, '__dict__'):
                         attrs = [k for k in vars(runtime).keys() if not k.startswith('_')]
-                        _LOGGER.info("  Runtime attributes: %s", attrs)
+                        _LOGGER.warning("  Runtime attributes: %s", attrs)
+                        
+                        # Check each attribute
+                        for attr in attrs:
+                            try:
+                                obj = getattr(runtime, attr)
+                                _LOGGER.warning("    %s: %s", attr, type(obj).__name__)
+                            except Exception as e:
+                                _LOGGER.warning("    %s: ERROR - %s", attr, str(e))
     
     hass.services.async_register(DOMAIN, "debug_hive_data", handle_debug_hive)
     
-    # Register simple diagnostic service if available
-    if SIMPLE_DIAGNOSTICS_AVAILABLE:
-        create_simple_diagnostic_service(hass)
-        _LOGGER.warning("Simple diagnostic service 'hive_schedule.simple_diagnose' registered - use WARNING level")
+    # Register simple diagnostic service
+    async def handle_simple_diagnose(call: ServiceCall) -> None:
+        """Handle simple diagnostic service call."""
+        _LOGGER.warning("=" * 80)
+        _LOGGER.warning("SIMPLE DIAGNOSTIC SERVICE CALLED")
+        _LOGGER.warning("=" * 80)
+        
+        try:
+            # Import here to avoid issues
+            from .simple_diagnostics import simple_diagnostic
+            await hass.async_add_executor_job(simple_diagnostic, hass)
+        except ImportError as e:
+            _LOGGER.error("Failed to import simple_diagnostics: %s", e)
+        except Exception as e:
+            _LOGGER.error("Error running diagnostic: %s", e, exc_info=True)
+    
+    hass.services.async_register(DOMAIN, "simple_diagnose", handle_simple_diagnose)
+    _LOGGER.warning("Simple diagnostic service 'hive_schedule.simple_diagnose' has been registered")
     
     _LOGGER.info("Hive Schedule Manager setup complete")
     return True
