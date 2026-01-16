@@ -361,12 +361,19 @@ class HiveScheduleAPI:
                 
                 _LOGGER.info("Top-level device IDs: %s", top_level_ids)
                 
-                # Dump full structure of first device to understand nesting
+                # Write full structure of first device to file for inspection
                 if len(devices_data) > 0 and isinstance(devices_data[0], dict):
-                    _LOGGER.info("=== FULL STRUCTURE OF FIRST DEVICE ===")
-                    first_device_str = json.dumps(devices_data[0], indent=2, default=str)
-                    _LOGGER.info(first_device_str)
-                    _LOGGER.info("=== END FIRST DEVICE ===")
+                    try:
+                        import os
+                        config_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                        debug_file = os.path.join(config_dir, "hive_devices_debug.json")
+                        
+                        with open(debug_file, 'w') as f:
+                            json.dump(devices_data[0], f, indent=2, default=str)
+                        
+                        _LOGGER.info("✓ Wrote first device structure to: %s", debug_file)
+                    except Exception as e:
+                        _LOGGER.error("Could not write debug file: %s", e)
                 
                 # Now search recursively in all devices for the target node_id
                 _LOGGER.info("Searching recursively for node_id: %s", node_id)
