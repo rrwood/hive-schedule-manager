@@ -137,19 +137,24 @@ class HiveScheduleAPI:
                 "Hive authentication not available. Ensure Hive integration is loaded."
             )
         
-        # Use stored token or get from Hive API
-        token = self._token
-        
-        # If no stored token, try to get from Hive API
-        if not token and self._hive_api and hasattr(self._hive_api, 'auth'):
+        # Priority 1: Try to get live token from Hive API runtime
+        token = None
+        if self._hive_api and hasattr(self._hive_api, 'auth'):
             auth = self._hive_api.auth
             if hasattr(auth, 'access_token'):
                 token = auth.access_token
-                _LOGGER.debug("Using token from Hive API client")
+                if token:
+                    _LOGGER.debug("Using live token from Hive API runtime")
+        
+        # Priority 2: Use stored token
+        if not token:
+            token = self._token
+            if token:
+                _LOGGER.debug("Using stored token")
         
         if not token:
             _LOGGER.error("Cannot update schedule: Unable to get auth token")
-            raise HomeAssistantError("Hive authentication not available")
+            raise HomeAssistantError("Hive authentication not available - token is None")
         
         # Update session header with current token
         self.session.headers["Authorization"] = token
@@ -158,15 +163,17 @@ class HiveScheduleAPI:
         
         try:
             _LOGGER.debug("Sending schedule update to %s", url)
+            _LOGGER.debug("Using token (first 20 chars): %s...", token[:20] if token else "None")
             response = self.session.post(url, json=schedule_data, timeout=30)
             response.raise_for_status()
             _LOGGER.info("Successfully updated Hive schedule for node %s", node_id)
             return True
         except requests.exceptions.HTTPError as err:
             if err.response.status_code == 401:
-                _LOGGER.error("Authentication failed. Token may have expired.")
+                _LOGGER.error("Authentication failed (401). Token may have expired.")
+                _LOGGER.error("Response: %s", err.response.text[:200] if hasattr(err.response, 'text') else 'no response text')
                 raise HomeAssistantError(
-                    "Hive authentication failed. Try reloading the Hive integration."
+                    "Hive authentication failed. Token expired - restart Home Assistant to refresh."
                 ) from err
             if err.response.status_code == 404:
                 _LOGGER.error("Node ID not found: %s", node_id)
@@ -313,14 +320,53 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     
     async def refresh_auth(now=None) -> None:
         """Refresh authentication token from Hive integration."""
+        # First, try to trigger Hive to refresh its token
+        hive_entries = hass.config_entries.async_entries("hive")
+        for entry in hive_entries:
+            if hasattr(entry, 'runtime_data') and entry.runtime_data:
+                runtime = entry.runtime_data
+                
+                # Try to trigger a token refresh in the Hive integration
+                if hasattr(runtime, 'auth'):
+                    auth = runtime.auth
+                    
+                    # Check if auth has a refresh method
+                    for method_name in ['refresh', 'refreshToken', 'refresh_token', 'updateTokens']:
+                        if hasattr(auth, method_name):
+                            try:
+                                method = getattr(auth, method_name)
+                                if callable(method):
+                                    _LOGGER.debug("Calling auth.%s() to refresh token", method_name)
+                                    
+                                    # Try calling it (might be async or sync)
+                                    try:
+                                        result = await method()
+                                        _LOGGER.debug("Token refresh returned: %s", type(result))
+                                    except TypeError:
+                                        # Not async, try sync
+                                        result = await hass.async_add_executor_job(method)
+                                        _LOGGER.debug("Token refresh (sync) returned: %s", type(result))
+                                    break
+                            except Exception as e:
+                                _LOGGER.debug("Error calling auth.%s(): %s", method_name, e)
+                
+                # Now check if access_token is populated
+                if hasattr(runtime, 'auth') and hasattr(runtime.auth, 'access_token'):
+                    token = runtime.auth.access_token
+                    if token and isinstance(token, str) and len(token) > 50:
+                        _LOGGER.info("✓ Got live token from runtime.auth.access_token after refresh")
+                        api.update_auth(token)
+                        api.set_hive_api(runtime.api if hasattr(runtime, 'api') else None)
+                        return
+        
+        # If live token not available, try stored token
         token = await hass.async_add_executor_job(get_hive_auth_token)
         if token:
             if not api.has_auth:
-                _LOGGER.info("Successfully obtained Hive authentication token")
+                _LOGGER.info("Using stored token from entry.data (may need refresh)")
             api.update_auth(token)
         else:
             # Try to get reference to Hive API client instead
-            hive_entries = hass.config_entries.async_entries("hive")
             for entry in hive_entries:
                 if hasattr(entry, 'runtime_data') and entry.runtime_data:
                     runtime = entry.runtime_data
@@ -625,6 +671,19 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         _LOGGER.warning("=" * 80)
     
     hass.services.async_register(DOMAIN, "find_node_ids", handle_find_nodes)
+    
+    # Service to manually refresh token
+    async def handle_refresh_token(call: ServiceCall) -> None:
+        """Manually refresh the Hive authentication token."""
+        _LOGGER.warning("Manual token refresh requested")
+        await refresh_auth(now=True)
+        
+        if api.has_auth:
+            _LOGGER.warning("✓ Token refresh successful")
+        else:
+            _LOGGER.error("✗ Token refresh failed")
+    
+    hass.services.async_register(DOMAIN, "refresh_token", handle_refresh_token)
     
     # Register simple diagnostic service
     async def handle_simple_diagnose(call: ServiceCall) -> None:
