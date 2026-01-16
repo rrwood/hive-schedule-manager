@@ -1,7 +1,10 @@
 """
 Hive Schedule Manager Integration for Home Assistant
 Enables programmatic control of British Gas Hive heating schedules.
-v5
+
+Artifact Version: v8
+Last Updated: 2026-01-16
+
 For documentation, visit: https://github.com/YOUR_USERNAME/hive-schedule-manager
 """
 from __future__ import annotations
