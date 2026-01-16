@@ -385,30 +385,28 @@ class HiveScheduleAPI:
                     device_id = device.get("id") if isinstance(device, dict) else "N/A"
                     top_level_ids.append(device_id)
                     device_keys = list(device.keys()) if isinstance(device, dict) else "N/A"
-                    device_type = device.get("type") if isinstance(device, dict) else "N/A"
-                    _LOGGER.info("Item %d: id=%s, type=%s, keys=%s", idx, device_id, device_type, device_keys)
+                    _LOGGER.info("Item %d: id=%s, keys=%s", idx, device_id, device_keys)
                 
                 _LOGGER.info("Top-level device IDs: %s", top_level_ids)
                 
-                # Write ENTIRE response to file for inspection
-                try:
-                    import os
-                    config_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                    debug_file = os.path.join(config_dir, "hive_all_devices_debug.json")
-                    
-                    with open(debug_file, 'w') as f:
-                        json.dump(devices_data, f, indent=2, default=str)
-                    
-                    _LOGGER.info("✓ Wrote ALL devices to: %s", debug_file)
-                except Exception as e:
-                    _LOGGER.error("Could not write all devices debug file: %s", e)
+                # Write full structure of first device to file for inspection
+                if len(devices_data) > 0 and isinstance(devices_data[0], dict):
+                    try:
+                        import os
+                        config_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                        debug_file = os.path.join(config_dir, "hive_devices_debug.json")
+                        
+                        with open(debug_file, 'w') as f:
+                            json.dump(devices_data[0], f, indent=2, default=str)
+                        
+                        _LOGGER.info("✓ Wrote first device structure to: %s", debug_file)
+                    except Exception as e:
+                        _LOGGER.error("Could not write debug file: %s", e)
                 
                 # Now search recursively in all devices for the target node_id
                 _LOGGER.info("Searching recursively for node_id: %s", node_id)
                 for idx, device in enumerate(devices_data):
-                    device_id = device.get("id") if isinstance(device, dict) else "N/A"
-                    device_type = device.get("type") if isinstance(device, dict) else "N/A"
-                    _LOGGER.debug("Searching in device %d (id=%s, type=%s)", idx, device_id, device_type)
+                    _LOGGER.debug("Searching in device %d (id=%s)", idx, device.get("id") if isinstance(device, dict) else "N/A")
                     
                     # Search this device for the node_id
                     schedule = self._find_schedule_in_object(device, node_id)
@@ -421,147 +419,235 @@ class HiveScheduleAPI:
                 _LOGGER.info("Available top-level IDs: %s", top_level_ids)
                 return None
             
-            # Structure 2: Check if it's a dict (keyed by ID)
-            elif isinstance(devices_data, dict):
-                _LOGGER.info("Response is a dict with %d keys", len(devices_data))
-                all_keys = list(devices_data.keys())
-                _LOGGER.info("Dict keys: %s", all_keys)
-                
-                # Write entire dict to file
-                try:
-                    import os
-                    config_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                    debug_file = os.path.join(config_dir, "hive_all_devices_debug.json")
-                    
-                    with open(debug_file, 'w') as f:
-                        json.dump(devices_data, f, indent=2, default=str)
-                    
-                    _LOGGER.info("✓ Wrote dict response to: %s", debug_file)
-                except Exception as e:
-                    _LOGGER.error("Could not write debug file: %s", e)
-                
-                # Try to directly find the node_id as a key
-                if node_id in devices_data:
-                    _LOGGER.info("✓ Found node_id as direct key in response")
-                    node_data = devices_data[node_id]
-                    if isinstance(node_data, dict) and "schedule" in node_data:
-                        _LOGGER.info("✓ Found schedule in direct node_id entry")
-                        return node_data.get("schedule")
-                
-                # Recursively search all values
-                _LOGGER.info("Searching recursively in dict values for node_id: %s", node_id)
-                for key, value in devices_data.items():
-                    if isinstance(value, (dict, list)):
-                        result = self._find_schedule_in_object(value, node_id, 0, f"[key={key}]")
-                        if result:
-                            return result
-                
-                return None
-        
-        except Exception as e:
-            _LOGGER.error("Error extracting schedule from devices: %s", e)
+            _LOGGER.warning("Response is not a list, it's: %s", type(devices_data))
+            return None
+            
+        except Exception as err:
+            _LOGGER.error("Error extracting schedule from devices: %s", err)
+            _LOGGER.error("Traceback: %s", traceback.format_exc())
             return None
     
     def _find_schedule_in_object(self, obj: Any, node_id: str, depth: int = 0, path: str = "") -> dict[str, Any] | None:
-        """Recursively search for schedule in nested object."""
-        if depth > 10:
+        """Recursively find schedule in an object, optionally associated with a node_id."""
+        if depth > 15:  # Prevent infinite recursion
             return None
         
         if isinstance(obj, dict):
-            if obj.get("id") == node_id and "schedule" in obj:
-                _LOGGER.info("✓ Found schedule at %s", path)
-                return obj.get("schedule")
+            current_id = obj.get("id", "")
+            current_path = f"{path}[id={current_id}]" if current_id else path
             
+            # Log if we find the target node_id
+            if current_id == node_id:
+                _LOGGER.info("Found target node_id at depth %d, path: %s", depth, current_path)
+            
+            # If this object has schedule, check if it matches our node_id
+            if "schedule" in obj:
+                obj_id = obj.get("id")
+                if obj_id is None or obj_id == node_id:
+                    _LOGGER.info("✓ Found schedule at depth %d, path: %s", depth, current_path)
+                    return obj.get("schedule")
+            
+            # Recursively search nested dicts
             for key, value in obj.items():
-                result = self._find_schedule_in_object(value, node_id, depth + 1, f"{path}.{key}")
-                if result:
-                    return result
+                if isinstance(value, (dict, list)):
+                    result = self._find_schedule_in_object(value, node_id, depth + 1, f"{current_path}.{key}")
+                    if result:
+                        return result
         
         elif isinstance(obj, list):
+            # Recursively search list items
             for idx, item in enumerate(obj):
-                result = self._find_schedule_in_object(item, node_id, depth + 1, f"{path}[{idx}]")
-                if result:
-                    return result
+                if isinstance(item, (dict, list)):
+                    result = self._find_schedule_in_object(item, node_id, depth + 1, f"{path}[{idx}]")
+                    if result:
+                        return result
         
         return None
-    
-    def set_schedule(self, node_id: str, schedule: dict[str, Any]) -> bool:
-        """Set the heating schedule for a node."""
-        try:
-            token = self.auth.get_id_token()
-            if not token:
-                _LOGGER.error("Cannot set schedule: No auth token available")
-                return False
-            
-            self.session.headers["Authorization"] = token
-            
-            url = f"{self.BASE_URL}/nodes/heating/{node_id}"
-            payload = {"schedule": schedule}
-            
-            _LOGGER.debug("Setting schedule for node %s", node_id)
-            response = self.session.put(url, json=payload, timeout=30)
-            response.raise_for_status()
-            
-            _LOGGER.info("✓ Successfully set schedule for node %s", node_id)
-            return True
-        
-        except Exception as e:
-            _LOGGER.error("Failed to set schedule: %s", e)
-            return False
-
 
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
-    """Set up the Hive Schedule integration."""
-    try:
-        hive_config = config.get(DOMAIN, {})
-        username = hive_config.get(CONF_USERNAME)
-        password = hive_config.get(CONF_PASSWORD)
-        scan_interval = hive_config.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
-        
-        if not username or not password:
-            _LOGGER.error("Username and password are required")
+    """Set up the Hive Schedule Manager component."""
+    
+    _LOGGER.info("Setting up Hive Schedule Manager (Standalone v2.0)")
+    
+    conf = config.get(DOMAIN, {})
+    username = conf.get(CONF_USERNAME)
+    password = conf.get(CONF_PASSWORD)
+    scan_interval = conf.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+    
+    if not username or not password:
+        _LOGGER.error("Hive username and password are required in configuration.yaml")
+        return False
+    
+    auth = HiveAuth(username, password)
+    api = HiveScheduleAPI(auth)
+    
+    hass.data[DOMAIN] = {
+        "auth": auth,
+        "api": api
+    }
+    
+    def initial_auth():
+        """Perform initial authentication."""
+        if not auth.authenticate():
+            if auth.is_mfa_required():
+                _LOGGER.warning("MFA required - waiting for user to provide SMS code via verify_mfa_code service")
+                return False
+            _LOGGER.error("Initial authentication failed - check your Hive username and password")
             return False
-        
-        # Initialize auth
-        auth = HiveAuth(username, password)
-        api = HiveScheduleAPI(auth)
-        
-        # Store in hass data
-        hass.data[DOMAIN] = {
-            "auth": auth,
-            "api": api,
-        }
-        
-        # Register services
-        async def handle_set_schedule(call: ServiceCall) -> None:
-            """Handle set schedule service call."""
-            try:
-                node_id = call.data.get(ATTR_NODE_ID)
-                schedule = call.data.get(ATTR_SCHEDULE)
-                
-                if not api.set_schedule(node_id, schedule):
-                    _LOGGER.error("Failed to set schedule")
-            except Exception as e:
-                _LOGGER.error("Error handling set_schedule: %s", e)
-        
-        async def handle_verify_mfa(call: ServiceCall) -> None:
-            """Handle MFA verification service call."""
-            try:
-                code = call.data.get(ATTR_MFA_CODE)
-                if auth.verify_mfa(code):
-                    _LOGGER.info("MFA verification successful")
-                else:
-                    _LOGGER.error("MFA verification failed")
-            except Exception as e:
-                _LOGGER.error("Error handling verify_mfa: %s", e)
-        
-        hass.services.async_register(DOMAIN, SERVICE_SET_SCHEDULE, handle_set_schedule, SET_SCHEDULE_SCHEMA)
-        hass.services.async_register(DOMAIN, SERVICE_VERIFY_MFA, handle_verify_mfa, MFA_SCHEMA)
-        
-        _LOGGER.info("✓ Hive Schedule integration setup complete")
         return True
     
-    except Exception as e:
-        _LOGGER.error("Failed to set up Hive Schedule integration: %s", e)
-        traceback.print_exc()
-        return False
+    if not await hass.async_add_executor_job(initial_auth):
+        if not auth.is_mfa_required():
+            _LOGGER.warning("Failed to authenticate on startup - will retry")
+    
+    async def refresh_token_periodic(now=None):
+        """Periodically refresh the authentication token."""
+        await hass.async_add_executor_job(auth.refresh_token)
+    
+    async_track_time_interval(hass, refresh_token_periodic, scan_interval)
+    
+    async def handle_verify_mfa(call: ServiceCall) -> None:
+        """Handle MFA code verification."""
+        mfa_code = call.data.get(ATTR_MFA_CODE)
+        if not mfa_code:
+            _LOGGER.error("MFA code not provided")
+            return
+        
+        _LOGGER.info("Verifying MFA code...")
+        success = await hass.async_add_executor_job(auth.verify_mfa, mfa_code)
+        
+        if success:
+            _LOGGER.info("✓ MFA verified successfully - integration setup complete")
+        else:
+            _LOGGER.error("✗ MFA verification failed - invalid code")
+    
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_VERIFY_MFA,
+        handle_verify_mfa,
+        schema=MFA_SCHEMA
+    )
+    
+    async def handle_set_schedule(call: ServiceCall) -> None:
+        """Handle set_heating_schedule service call."""
+        node_id = call.data[ATTR_NODE_ID]
+        schedule_config = call.data[ATTR_SCHEDULE]
+        
+        _LOGGER.info("Setting complete schedule for node %s", node_id)
+        
+        schedule_data: dict[str, Any] = {"schedule": {}}
+        
+        for day in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
+            if day in schedule_config:
+                day_schedule = []
+                for entry in schedule_config[day]:
+                    day_schedule.append(
+                        api.build_schedule_entry(entry["time"], entry["temp"])
+                    )
+                schedule_data["schedule"][day] = day_schedule
+            else:
+                schedule_data["schedule"][day] = [
+                    api.build_schedule_entry("00:00", 16.0)
+                ]
+        
+        await hass.async_add_executor_job(api.update_schedule, node_id, schedule_data)
+    
+    async def handle_set_day(call: ServiceCall) -> None:
+        """Handle set_day_schedule service call."""
+        node_id = call.data[ATTR_NODE_ID]
+        day = call.data[ATTR_DAY].lower()
+        day_schedule = call.data[ATTR_SCHEDULE]
+        
+        _LOGGER.info("Setting schedule for %s on node %s", day, node_id)
+        _LOGGER.debug("New schedule for %s: %s", day, day_schedule)
+        
+        current_schedule = await hass.async_add_executor_job(api.get_schedule, node_id)
+        
+        if current_schedule is None:
+            _LOGGER.error("Could not fetch current schedule - cannot safely update single day")
+            raise HomeAssistantError(
+                "Unable to fetch current schedule. Please use set_heating_schedule to set complete schedule."
+            )
+        
+        schedule_data: dict[str, Any] = {"schedule": {}}
+        
+        for d in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
+            if d == day:
+                schedule_data["schedule"][d] = [
+                    api.build_schedule_entry(entry["time"], entry["temp"])
+                    for entry in day_schedule
+                ]
+                _LOGGER.info("Updated %s: %s", d, json.dumps(schedule_data["schedule"][d], indent=2))
+            else:
+                if d in current_schedule:
+                    schedule_data["schedule"][d] = current_schedule[d]
+                    _LOGGER.info("Preserved %s: %s", d, json.dumps(current_schedule[d], indent=2, default=str))
+                else:
+                    _LOGGER.error("Day %s missing from fetched schedule!", d)
+                    raise HomeAssistantError(f"Schedule for {d} missing in response")
+        
+        _LOGGER.info("Complete schedule to send: %s", json.dumps(schedule_data, indent=2, default=str))
+        await hass.async_add_executor_job(api.update_schedule, node_id, schedule_data)
+    
+    async def handle_calendar_update(call: ServiceCall) -> None:
+        """Handle update_from_calendar service call."""
+        node_id = call.data[ATTR_NODE_ID]
+        is_workday = call.data[ATTR_IS_WORKDAY]
+        wake_time = call.data.get(ATTR_WAKE_TIME, "06:30" if is_workday else "07:30")
+        
+        tomorrow = datetime.now() + timedelta(days=1)
+        day = tomorrow.strftime("%A").lower()
+        
+        _LOGGER.info("Updating %s schedule from calendar (workday=%s)", day, is_workday)
+        
+        if is_workday:
+            day_schedule = [
+                {"time": wake_time, "temp": 18.0},
+                {"time": "09:15", "temp": 18.5},
+                {"time": "09:30", "temp": 18.0},
+                {"time": "15:30", "temp": 18.0},
+                {"time": "16:30", "temp": 19.5},
+                {"time": "21:30", "temp": 16.0}
+            ]
+        else:
+            day_schedule = [
+                {"time": wake_time, "temp": 18.0},
+                {"time": "09:15", "temp": 18.5},
+                {"time": "09:30", "temp": 18.0},
+                {"time": "16:30", "temp": 19.5},
+                {"time": "21:30", "temp": 16.0}
+            ]
+        
+        await handle_set_day(
+            ServiceCall(
+                DOMAIN,
+                SERVICE_SET_DAY,
+                {ATTR_NODE_ID: node_id, ATTR_DAY: day, ATTR_SCHEDULE: day_schedule}
+            )
+        )
+    
+    hass.services.async_register(
+        DOMAIN, SERVICE_SET_SCHEDULE, handle_set_schedule, schema=SET_SCHEDULE_SCHEMA
+    )
+    
+    hass.services.async_register(
+        DOMAIN, SERVICE_SET_DAY, handle_set_day, schema=SET_DAY_SCHEMA
+    )
+    
+    hass.services.async_register(
+        DOMAIN, SERVICE_UPDATE_FROM_CALENDAR, handle_calendar_update, schema=CALENDAR_SCHEMA
+    )
+    
+    async def handle_refresh_token(call: ServiceCall) -> None:
+        """Manually refresh the Hive authentication token."""
+        _LOGGER.info("Manual token refresh requested")
+        success = await hass.async_add_executor_job(auth.refresh_token)
+        if success:
+            _LOGGER.info("✓ Token refresh successful")
+        else:
+            _LOGGER.error("✗ Token refresh failed")
+    
+    hass.services.async_register(DOMAIN, "refresh_token", handle_refresh_token)
+    
+    _LOGGER.info("✓ Hive Schedule Manager setup complete (Standalone v2.0)")
+    return True
