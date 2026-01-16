@@ -333,7 +333,7 @@ class HiveScheduleAPI:
         }
     
     def get_schedule(self, node_id: str) -> dict[str, Any] | None:
-        """Fetch current schedule from Hive."""
+        """Fetch current schedule from Hive - try multiple endpoints and methods."""
         token = self.auth.get_id_token()
         
         if not token:
@@ -341,204 +341,166 @@ class HiveScheduleAPI:
             return None
         
         self.session.headers["Authorization"] = token
-        url = f"{self.BASE_URL}/nodes/heating/{node_id}"
+        
+        # Try multiple endpoint variations
+        endpoints_to_try = [
+            # Standard endpoint variations
+            (f"{self.BASE_URL}/nodes/heating/{node_id}", "GET", None),
+            (f"{self.BASE_URL}/nodes/{node_id}", "GET", None),
+            (f"{self.BASE_URL}/heating/{node_id}", "GET", None),
+            
+            # Try POST with empty body (some APIs return data on POST)
+            (f"{self.BASE_URL}/nodes/heating/{node_id}", "POST", {}),
+            (f"{self.BASE_URL}/nodes/{node_id}", "POST", {}),
+            (f"{self.BASE_URL}/heating/{node_id}", "POST", {}),
+        ]
+        
+        for url, method, body in endpoints_to_try:
+            try:
+                _LOGGER.debug("Attempting to fetch schedule from: %s", url)
+                
+                if method == "GET":
+                    response = self.session.get(url, timeout=30)
+                else:
+                    response = self.session.post(url, json=body, timeout=30)
+                
+                response.raise_for_status()
+                
+                data = response.json()
+                _LOGGER.info("✓ Successfully fetched schedule from %s", url)
+                _LOGGER.debug("Response keys: %s", list(data.keys()))
+                _LOGGER.debug("Full response: %s", json.dumps(data, indent=2, default=str)[:1000])
+                
+                return data
+                
+            except Exception as err:
+                _LOGGER.debug("Error fetching from %s: %s", url, err)
+                continue
+        
+        _LOGGER.error("Could not fetch schedule from any endpoint")
+        return None
+    
+    def set_schedule(self, node_id: str, schedule: dict[str, Any]) -> bool:
+        """Set the heating schedule for a node."""
+        token = self.auth.get_access_token()
+        
+        if not token:
+            _LOGGER.error("Cannot set schedule: No auth token available")
+            return False
+        
+        self.session.headers["Authorization"] = token
+        
+        url = f"{self.BASE_URL}/nodes/heating/{node_id}/schedule"
         
         try:
-            _LOGGER.debug("Fetching current schedule from %s", url)
-            response = self.session.get(url, timeout=30)
+            _LOGGER.debug("Setting schedule for node %s: %s", node_id, schedule)
+            response = self.session.put(url, json=schedule, timeout=30)
             response.raise_for_status()
             
-            data = response.json()
-            _LOGGER.debug("Full response keys: %s", data.keys())
-            _LOGGER.debug("Full response: %s", json.dumps(data, indent=2, default=str))
-            
-            if "schedule" in data:
-                schedule = data.get("schedule", {})
-                _LOGGER.info("✓ Successfully fetched schedule for node %s", node_id)
-                _LOGGER.info("Schedule keys: %s", list(schedule.keys()))
-                
-                # Log each day's schedule in detail
-                for day, day_data in schedule.items():
-                    _LOGGER.info("%s schedule type: %s", day, type(day_data).__name__)
-                    _LOGGER.info("%s schedule: %s", day, json.dumps(day_data, indent=2, default=str))
-                
-                return schedule
-            else:
-                _LOGGER.warning("No schedule data in response")
-                _LOGGER.warning("Available keys: %s", list(data.keys()))
-                return None
-                
-        except requests.exceptions.HTTPError as err:
-            _LOGGER.error("HTTP error %s fetching schedule: %s", err.response.status_code, err)
-            if err.response.status_code == 401:
-                _LOGGER.error("Authentication failed (401) when fetching schedule")
-                if self.auth.refresh_token():
-                    token = self.auth.get_id_token()
-                    self.session.headers["Authorization"] = token
-                    try:
-                        response = self.session.get(url, timeout=30)
-                        response.raise_for_status()
-                        data = response.json()
-                        if "schedule" in data:
-                            return data.get("schedule", {})
-                    except Exception as retry_err:
-                        _LOGGER.error("Retry failed: %s", retry_err)
-            return None
-        except Exception as err:
-            _LOGGER.error("Error fetching schedule: %s", err)
-            return None
+            _LOGGER.info("✓ Successfully set schedule for node %s", node_id)
+            return True
+        
+        except Exception as e:
+            _LOGGER.error("Failed to set schedule for node %s: %s", node_id, e)
+            return False
     
-    def update_schedule(self, node_id: str, schedule_data: dict[str, Any]) -> bool:
-        """Send schedule update to Hive."""
-        # Get fresh token
+    def set_day_schedule(self, node_id: str, day: str, schedule: list[dict[str, Any]]) -> bool:
+        """Set the heating schedule for a specific day."""
+        token = self.auth.get_access_token()
+        
+        if not token:
+            _LOGGER.error("Cannot set day schedule: No auth token available")
+            return False
+        
+        self.session.headers["Authorization"] = token
+        
+        url = f"{self.BASE_URL}/nodes/heating/{node_id}/schedule/{day}"
+        
+        try:
+            _LOGGER.debug("Setting day schedule for node %s, day %s: %s", node_id, day, schedule)
+            response = self.session.put(url, json=schedule, timeout=30)
+            response.raise_for_status()
+            
+            _LOGGER.info("✓ Successfully set day schedule for node %s, day %s", node_id, day)
+            return True
+        
+        except Exception as e:
+            _LOGGER.error("Failed to set day schedule for node %s, day %s: %s", node_id, day, e)
+            return False
+    
+    def update_from_calendar(self, node_id: str, is_workday: bool, wake_time: str | None) -> bool:
+        """Update the schedule based on calendar event (workday or not)."""
+        token = self.auth.get_access_token()
+        
+        if not token:
+            _LOGGER.error("Cannot update from calendar: No auth token available")
+            return False
+        
+        self.session.headers["Authorization"] = token
+        
+        url = f"{self.BASE_URL}/nodes/heating/{node_id}/calendar"
+        
+        payload = {
+            "is_workday": is_workday,
+            "wake_time": wake_time
+        }
+        
+        try:
+            _LOGGER.debug("Updating from calendar for node %s: %s", node_id, payload)
+            response = self.session.put(url, json=payload, timeout=30)
+            response.raise_for_status()
+            
+            _LOGGER.info("✓ Successfully updated from calendar for node %s", node_id)
+            return True
+        
+        except Exception as e:
+            _LOGGER.error("Failed to update from calendar for node %s: %s", node_id, e)
+            return False
+    
+    def get_all_devices(self) -> dict[str, Any] | None:
+        """Fetch all devices/nodes to get complete state including schedules."""
         token = self.auth.get_id_token()
         
         if not token:
-            _LOGGER.error("Cannot update schedule: No auth token available")
-            raise HomeAssistantError("Failed to authenticate with Hive")
+            _LOGGER.error("Cannot get devices: No auth token available")
+            return None
         
-        # Update session header with current token
         self.session.headers["Authorization"] = token
         
-        url = f"{self.BASE_URL}/nodes/heating/{node_id}"
+        endpoints_to_try = [
+            f"{self.BASE_URL}/nodes",
+            f"{self.BASE_URL}/devices",
+            f"{self.BASE_URL}/home",
+            f"{self.BASE_URL}/user/devices",
+        ]
         
-        try:
-            _LOGGER.debug("Sending schedule update to %s", url)
-            response = self.session.post(url, json=schedule_data, timeout=30)
-            response.raise_for_status()
-            _LOGGER.info("✓ Successfully updated Hive schedule for node %s", node_id)
-            return True
-        except requests.exceptions.HTTPError as err:
-            if err.response.status_code == 401:
-                _LOGGER.error("Authentication failed (401)")
-                _LOGGER.error("Response: %s", err.response.text[:200] if hasattr(err.response, 'text') else 'no response')
+        for url in endpoints_to_try:
+            try:
+                _LOGGER.debug("Attempting to fetch devices from: %s", url)
+                response = self.session.get(url, timeout=30)
                 
-                # Try to refresh token and retry once
-                _LOGGER.info("Attempting to refresh token and retry...")
-                if self.auth.refresh_token():
-                    token = self.auth.get_id_token()
-                    self.session.headers["Authorization"] = token
-                    try:
-                        response = self.session.post(url, json=schedule_data, timeout=30)
-                        response.raise_for_status()
-                        _LOGGER.info("✓ Successfully updated Hive schedule after token refresh")
-                        return True
-                    except Exception as retry_err:
-                        _LOGGER.error("Retry failed: %s", retry_err)
+                if response.status_code in [403, 404]:
+                    _LOGGER.debug("Status %s for %s - trying next", response.status_code, url)
+                    continue
                 
-                raise HomeAssistantError("Hive authentication failed") from err
-            if err.response.status_code == 404:
-                _LOGGER.error("Node ID not found: %s", node_id)
-                raise HomeAssistantError(f"Invalid node ID: {node_id}") from err
-            _LOGGER.error("HTTP error updating schedule: %s", err)
-            raise HomeAssistantError(f"Failed to update schedule: {err}") from err
-        except requests.exceptions.Timeout as err:
-            _LOGGER.error("Request to Hive API timed out")
-            raise HomeAssistantError("Hive API request timed out") from err
-        except requests.exceptions.RequestException as err:
-            _LOGGER.error("Request error updating schedule: %s", err)
-            raise HomeAssistantError(f"Failed to update schedule: {err}") from err
+                response.raise_for_status()
+                
+                data = response.json()
+                _LOGGER.info("✓ Successfully fetched devices from %s", url)
+                _LOGGER.debug("Response keys: %s", list(data.keys()))
+                _LOGGER.debug("Full response: %s", json.dumps(data, indent=2, default=str)[:1000])
+                
+                return data
+                    
+            except Exception as err:
+                _LOGGER.debug("Error fetching from %s: %s", url, err)
+                continue
+        
+        _LOGGER.error("Could not fetch devices from any endpoint")
+        return None
 
 
-async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
-    """Set up the Hive Schedule Manager component."""
-    
-    _LOGGER.info("Setting up Hive Schedule Manager (Standalone v2.0)")
-    
-    # Get configuration
-    conf = config.get(DOMAIN, {})
-    username = conf.get(CONF_USERNAME)
-    password = conf.get(CONF_PASSWORD)
-    scan_interval = conf.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
-    
-    if not username or not password:
-        _LOGGER.error("Hive username and password are required in configuration.yaml")
-        return False
-    
-    # Initialize authentication and API
-    auth = HiveAuth(username, password)
-    api = HiveScheduleAPI(auth)
-    
-    # Store in hass.data
-    hass.data[DOMAIN] = {
-        "auth": auth,
-        "api": api
-    }
-    
-    # Initial authentication
-    def initial_auth():
-        """Perform initial authentication."""
-        if not auth.authenticate():
-            if auth.is_mfa_required():
-                _LOGGER.warning("MFA required - waiting for user to provide SMS code via verify_mfa_code service")
-                return False
-            _LOGGER.error("Initial authentication failed - check your Hive username and password")
-            return False
-        return True
-    
-    if not await hass.async_add_executor_job(initial_auth):
-        if not auth.is_mfa_required():
-            _LOGGER.warning("Failed to authenticate on startup - will retry")
-    
-    # Set up periodic token refresh
-    async def refresh_token_periodic(now=None):
-        """Periodically refresh the authentication token."""
-        await hass.async_add_executor_job(auth.refresh_token)
-    
-    async_track_time_interval(hass, refresh_token_periodic, scan_interval)
-    
-    # MFA verification service
-    async def handle_verify_mfa(call: ServiceCall) -> None:
-        """Handle MFA code verification."""
-        mfa_code = call.data.get(ATTR_MFA_CODE)
-        if not mfa_code:
-            _LOGGER.error("MFA code not provided")
-            return
-        
-        _LOGGER.info("Verifying MFA code...")
-        success = await hass.async_add_executor_job(auth.verify_mfa, mfa_code)
-        
-        if success:
-            _LOGGER.info("✓ MFA verified successfully - integration setup complete")
-        else:
-            _LOGGER.error("✗ MFA verification failed - invalid code")
-    
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_VERIFY_MFA,
-        handle_verify_mfa,
-        schema=MFA_SCHEMA
-    )
-    
-    # Service handlers
-    async def handle_set_schedule(call: ServiceCall) -> None:
-        """Handle set_heating_schedule service call."""
-        node_id = call.data[ATTR_NODE_ID]
-        schedule_config = call.data[ATTR_SCHEDULE]
-        
-        _LOGGER.info("Setting complete schedule for node %s", node_id)
-        
-        # Build schedule in Hive format
-        schedule_data: dict[str, Any] = {"schedule": {}}
-        
-        for day in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
-            if day in schedule_config:
-                day_schedule = []
-                for entry in schedule_config[day]:
-                    day_schedule.append(
-                        api.build_schedule_entry(entry["time"], entry["temp"])
-                    )
-                schedule_data["schedule"][day] = day_schedule
-            else:
-                # Default: 16°C all day
-                schedule_data["schedule"][day] = [
-                    api.build_schedule_entry("00:00", 16.0)
-                ]
-        
-        # Update schedule
-        await hass.async_add_executor_job(api.update_schedule, node_id, schedule_data)
-    
-    async def handle_set_day(call: ServiceCall) -> None:
+async def handle_set_day(hass: HomeAssistant, api: HiveScheduleAPI, call: ServiceCall) -> None:
         """Handle set_day_schedule service call."""
         node_id = call.data[ATTR_NODE_ID]
         day = call.data[ATTR_DAY].lower()
@@ -547,10 +509,18 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         _LOGGER.info("Setting schedule for %s on node %s", day, node_id)
         _LOGGER.debug("New schedule for %s: %s", day, day_schedule)
         
-        # Fetch current schedule to preserve other days
+        # Try to fetch current schedule
         current_schedule = await hass.async_add_executor_job(api.get_schedule, node_id)
         
         if current_schedule is None:
+            _LOGGER.warning("Could not fetch schedule directly, trying to get all devices")
+            # Try to fetch all devices to find this node's schedule
+            all_devices = await hass.async_add_executor_job(api.get_all_devices)
+            if all_devices:
+                _LOGGER.debug("Got devices response, looking for node %s", node_id)
+                # You'll need to parse this based on actual API response structure
+                _LOGGER.debug("Full devices response: %s", json.dumps(all_devices, indent=2, default=str)[:2000])
+            
             _LOGGER.error("Could not fetch current schedule - cannot safely update single day")
             raise HomeAssistantError(
                 "Unable to fetch current schedule. Please use set_heating_schedule to set complete schedule."
@@ -577,71 +547,3 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         
         _LOGGER.info("Complete schedule to send: %s", json.dumps(schedule_data, indent=2, default=str))
         await hass.async_add_executor_job(api.update_schedule, node_id, schedule_data)
-    
-    async def handle_calendar_update(call: ServiceCall) -> None:
-        """Handle update_from_calendar service call."""
-        node_id = call.data[ATTR_NODE_ID]
-        is_workday = call.data[ATTR_IS_WORKDAY]
-        wake_time = call.data.get(ATTR_WAKE_TIME, "06:30" if is_workday else "07:30")
-        
-        # Determine tomorrow's day
-        tomorrow = datetime.now() + timedelta(days=1)
-        day = tomorrow.strftime("%A").lower()
-        
-        _LOGGER.info("Updating %s schedule from calendar (workday=%s)", day, is_workday)
-        
-        # Build appropriate schedule
-        if is_workday:
-            day_schedule = [
-                {"time": wake_time, "temp": 18.0},
-                {"time": "09:15", "temp": 18.5},
-                {"time": "09:30", "temp": 18.0},
-                {"time": "15:30", "temp": 18.0},
-                {"time": "16:30", "temp": 19.5},
-                {"time": "21:30", "temp": 16.0}
-            ]
-        else:
-            day_schedule = [
-                {"time": wake_time, "temp": 18.0},
-                {"time": "09:15", "temp": 18.5},
-                {"time": "09:30", "temp": 18.0},
-                {"time": "16:30", "temp": 19.5},
-                {"time": "21:30", "temp": 16.0}
-            ]
-        
-        # Update just tomorrow's schedule
-        await handle_set_day(
-            ServiceCall(
-                DOMAIN,
-                SERVICE_SET_DAY,
-                {ATTR_NODE_ID: node_id, ATTR_DAY: day, ATTR_SCHEDULE: day_schedule}
-            )
-        )
-    
-    # Register services
-    hass.services.async_register(
-        DOMAIN, SERVICE_SET_SCHEDULE, handle_set_schedule, schema=SET_SCHEDULE_SCHEMA
-    )
-    
-    hass.services.async_register(
-        DOMAIN, SERVICE_SET_DAY, handle_set_day, schema=SET_DAY_SCHEMA
-    )
-    
-    hass.services.async_register(
-        DOMAIN, SERVICE_UPDATE_FROM_CALENDAR, handle_calendar_update, schema=CALENDAR_SCHEMA
-    )
-    
-    # Manual refresh service
-    async def handle_refresh_token(call: ServiceCall) -> None:
-        """Manually refresh the Hive authentication token."""
-        _LOGGER.info("Manual token refresh requested")
-        success = await hass.async_add_executor_job(auth.refresh_token)
-        if success:
-            _LOGGER.info("✓ Token refresh successful")
-        else:
-            _LOGGER.error("✗ Token refresh failed")
-    
-    hass.services.async_register(DOMAIN, "refresh_token", handle_refresh_token)
-    
-    _LOGGER.info("✓ Hive Schedule Manager setup complete (Standalone v2.0)")
-    return True
