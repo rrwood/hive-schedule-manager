@@ -250,7 +250,25 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
                     if isinstance(tokens, dict):
                         _LOGGER.warning("  entry.data['tokens'] is dict with keys: %s", list(tokens.keys())[:10])
                         
-                        # Check for common token keys
+                        # AWS Cognito structure: tokens['AuthenticationResult'] contains the actual tokens
+                        if 'AuthenticationResult' in tokens:
+                            auth_result = tokens['AuthenticationResult']
+                            _LOGGER.warning("    Found 'AuthenticationResult', checking for tokens...")
+                            
+                            if isinstance(auth_result, dict):
+                                # Check for common AWS Cognito token keys
+                                for key in ['IdToken', 'AccessToken', 'id_token', 'access_token']:
+                                    if key in auth_result:
+                                        token = auth_result[key]
+                                        _LOGGER.warning("      Found '%s' in AuthenticationResult, type: %s", key, type(token).__name__)
+                                        
+                                        if token and isinstance(token, str) and len(token) > 50:
+                                            _LOGGER.info("✓ Found token at entry.data['tokens']['AuthenticationResult']['%s'] (length: %d)", key, len(token))
+                                            return token
+                                        else:
+                                            _LOGGER.warning("      '%s' is None or too short", key)
+                        
+                        # Also check direct keys (original code)
                         for key in ['IdToken', 'id_token', 'access_token', 'AccessToken', 'token']:
                             if key in tokens:
                                 token = tokens[key]
