@@ -366,11 +366,33 @@ class HiveScheduleAPI:
                 _LOGGER.info("Response is a list with %d items", len(devices_data))
                 for idx, device in enumerate(devices_data):
                     device_id = device.get("id") if isinstance(device, dict) else "N/A"
-                    has_schedule = "schedule" in device if isinstance(device, dict) else False
-                    _LOGGER.info("Item %d: id=%s, has_schedule=%s", idx, device_id, has_schedule)
-                    if device_id == node_id and has_schedule:
-                        _LOGGER.info("✓ Found schedule in list item %d", idx)
-                        return device.get("schedule")
+                    device_keys = list(device.keys()) if isinstance(device, dict) else "N/A"
+                    _LOGGER.info("Item %d: id=%s, keys=%s", idx, device_id, device_keys)
+                    
+                    # Log the full device for first item
+                    if idx == 0:
+                        _LOGGER.info("Full first device:\n%s", json.dumps(device, indent=2, default=str))
+                    
+                    # Check if this is the node we're looking for
+                    if device_id == node_id:
+                        _LOGGER.info("✓ Found matching node! Keys: %s", device_keys)
+                        _LOGGER.info("Full node data:\n%s", json.dumps(device, indent=2, default=str))
+                        
+                        # Now recursively search this device for schedule
+                        schedule = self._find_schedule_in_object(device, node_id)
+                        if schedule:
+                            _LOGGER.info("✓ Found schedule in matching node")
+                            return schedule
+                        else:
+                            _LOGGER.warning("Found matching node but no schedule inside it")
+                    
+                    # Also check if node_id is nested somewhere in this device
+                    if self._contains_node_id(device, node_id):
+                        _LOGGER.info("Item %d contains node_id %s somewhere inside", idx, node_id)
+                        schedule = self._find_schedule_in_object(device, node_id)
+                        if schedule:
+                            _LOGGER.info("✓ Found schedule in nested node")
+                            return schedule
             
             # Structure 2: Check for 'devices' key
             if isinstance(devices_data, dict) and "devices" in devices_data:
@@ -424,49 +446,51 @@ class HiveScheduleAPI:
             _LOGGER.error("Traceback: %s", traceback.format_exc())
             return None
     
-    def update_schedule(self, node_id: str, schedule_data: dict[str, Any]) -> bool:
-        """Send schedule update to Hive."""
-        token = self.auth.get_id_token()
+    def _contains_node_id(self, obj: Any, target_id: str, depth: int = 0) -> bool:
+        """Check if an object contains the target node_id anywhere inside."""
+        if depth > 5:  # Prevent deep recursion
+            return False
         
-        if not token:
-            _LOGGER.error("Cannot update schedule: No auth token available")
-            raise HomeAssistantError("Failed to authenticate with Hive")
+        if isinstance(obj, dict):
+            if obj.get("id") == target_id:
+                return True
+            for value in obj.values():
+                if self._contains_node_id(value, target_id, depth + 1):
+                    return True
+        elif isinstance(obj, list):
+            for item in obj:
+                if self._contains_node_id(item, target_id, depth + 1):
+                    return True
         
-        self.session.headers["Authorization"] = token
-        url = f"{self.BASE_URL}/nodes/heating/{node_id}"
+        return False
+    
+    def _find_schedule_in_object(self, obj: Any, node_id: str, depth: int = 0) -> dict[str, Any] | None:
+        """Recursively find schedule in an object, optionally associated with a node_id."""
+        if depth > 10:  # Prevent infinite recursion
+            return None
         
-        try:
-            _LOGGER.debug("Sending schedule update to %s", url)
-            response = self.session.post(url, json=schedule_data, timeout=30)
-            response.raise_for_status()
-            _LOGGER.info("✓ Successfully updated Hive schedule for node %s", node_id)
-            return True
-        except requests.exceptions.HTTPError as err:
-            if err.response.status_code == 401:
-                _LOGGER.error("Authentication failed (401)")
-                if self.auth.refresh_token():
-                    token = self.auth.get_id_token()
-                    self.session.headers["Authorization"] = token
-                    try:
-                        response = self.session.post(url, json=schedule_data, timeout=30)
-                        response.raise_for_status()
-                        _LOGGER.info("✓ Successfully updated Hive schedule after token refresh")
-                        return True
-                    except Exception as retry_err:
-                        _LOGGER.error("Retry failed: %s", retry_err)
-                raise HomeAssistantError("Hive authentication failed") from err
-            if err.response.status_code == 404:
-                _LOGGER.error("Node ID not found: %s", node_id)
-                raise HomeAssistantError(f"Invalid node ID: {node_id}") from err
-            _LOGGER.error("HTTP error updating schedule: %s", err)
-            raise HomeAssistantError(f"Failed to update schedule: {err}") from err
-        except requests.exceptions.Timeout as err:
-            _LOGGER.error("Request to Hive API timed out")
-            raise HomeAssistantError("Hive API request timed out") from err
-        except requests.exceptions.RequestException as err:
-            _LOGGER.error("Request error updating schedule: %s", err)
-            raise HomeAssistantError(f"Failed to update schedule: {err}") from err
-
+        if isinstance(obj, dict):
+            # If this object has schedule and either no id or matching id, return it
+            if "schedule" in obj:
+                obj_id = obj.get("id")
+                if obj_id is None or obj_id == node_id:
+                    _LOGGER.info("Found schedule at depth %d", depth)
+                    return obj.get("schedule")
+            
+            # Recursively search nested dicts
+            for key, value in obj.items():
+                result = self._find_schedule_in_object(value, node_id, depth + 1)
+                if result:
+                    return result
+        
+        elif isinstance(obj, list):
+            # Recursively search list items
+            for item in obj:
+                result = self._find_schedule_in_object(item, node_id, depth + 1)
+                if result:
+                    return result
+        
+        return None
 
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     """Set up the Hive Schedule Manager component."""
