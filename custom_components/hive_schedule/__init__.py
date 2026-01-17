@@ -1,6 +1,6 @@
 """
 Hive Schedule Manager Integration for Home Assistant
-Manages Hive heating schedules with profile support using apyhiveapi.
+Manages Hive heating schedules - depends on official Hive integration.
 Version: 1.1.0
 """
 from __future__ import annotations
@@ -9,13 +9,11 @@ import logging
 from typing import Any
 
 import voluptuous as vol
-from apyhiveapi import Auth, Hive
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import config_validation as cv
-from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
-from homeassistant.exceptions import HomeAssistantError, ConfigEntryAuthFailed
+from homeassistant.exceptions import HomeAssistantError
 
 from .const import (
     DOMAIN,
@@ -49,31 +47,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     
     _LOGGER.info("Setting up Hive Schedule Manager v1.1.0")
     
-    username = entry.data[CONF_USERNAME]
-    password = entry.data[CONF_PASSWORD]
+    # Get the Hive integration's API
+    hive_domain = "hive"
+    if hive_domain not in hass.data:
+        raise HomeAssistantError(
+            "Official Hive integration not found. "
+            "Please install and configure the Hive integration first."
+        )
     
-    # Initialize Hive API session
-    websession = hass.helpers.aiohttp_client.async_get_clientsession()
-    hive = Hive(websession=websession)
+    # Get the first hive entry
+    hive_entries = [
+        entry_data
+        for entry_data in hass.data[hive_domain].values()
+        if isinstance(entry_data, dict) and "hive" in entry_data
+    ]
     
-    # Create auth config
-    hive_config = {
-        "username": username,
-        "password": password,
-        "options": {
-            "sms_2fa": True  # Enable 2FA support
-        }
-    }
+    if not hive_entries:
+        raise HomeAssistantError(
+            "No Hive session found. "
+            "Please configure the official Hive integration first."
+        )
     
-    # Authenticate
-    try:
-        devices = await hive.session.startSession(hive_config)
-        if not devices:
-            raise ConfigEntryAuthFailed("Failed to start Hive session")
-        _LOGGER.info("Successfully authenticated with Hive using apyhiveapi")
-    except Exception as e:
-        _LOGGER.error("Authentication error: %s", e)
-        raise ConfigEntryAuthFailed(f"Authentication failed: {e}")
+    hive = hive_entries[0]["hive"]
+    _LOGGER.info("Using official Hive integration's API session")
     
     # Store in hass.data
     hass.data.setdefault(DOMAIN, {})
@@ -127,21 +123,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         
         _LOGGER.info("Setting schedule for %s on node %s", day, node_id)
         
-        # Build schedule with ONLY the selected day
+        # Build schedule entries
         schedule_entries = [
             build_schedule_entry(entry["time"], entry["temp"])
             for entry in day_schedule
         ]
         
-        # Update schedule using apyhiveapi
+        # Update schedule using the official Hive integration's API
         try:
-            # Use the heating API to update the schedule
+            # The official integration's hive object has heating.setSchedule method
             result = await hive.heating.setSchedule(node_id, day, schedule_entries)
             if not result:
                 raise HomeAssistantError("Failed to update schedule - API returned False")
-            _LOGGER.info("Successfully updated %s schedule", day)
+            _LOGGER.info("Successfully updated %s schedule via official Hive integration", day)
         except Exception as e:
             _LOGGER.error("Error updating schedule: %s", e)
+            _LOGGER.debug("Exception details:", exc_info=True)
             raise HomeAssistantError(f"Failed to update schedule: {e}")
     
     hass.services.async_register(
@@ -151,7 +148,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         schema=SET_DAY_SCHEMA
     )
     
-    _LOGGER.info("Hive Schedule Manager setup complete")
+    _LOGGER.info("Hive Schedule Manager setup complete - using official Hive integration")
     return True
 
 
