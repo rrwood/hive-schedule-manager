@@ -1,16 +1,15 @@
 """
 Hive Schedule Manager Integration for Home Assistant
-Manages Hive heating schedules with profile support using pyhiveapi.
+Manages Hive heating schedules with profile support using apyhiveapi.
 Version: 1.1.0
 """
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
 from typing import Any
 
 import voluptuous as vol
-from pyhiveapi import Hive
+from apyhiveapi import Auth, Hive
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
@@ -53,26 +52,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     username = entry.data[CONF_USERNAME]
     password = entry.data[CONF_PASSWORD]
     
-    # Initialize Hive API client
-    hive = Hive()
+    # Initialize Hive API session
+    websession = hass.helpers.aiohttp_client.async_get_clientsession()
+    hive = Hive(websession=websession)
+    
+    # Create auth config
+    hive_config = {
+        "username": username,
+        "password": password,
+        "options": {
+            "sms_2fa": True  # Enable 2FA support
+        }
+    }
     
     # Authenticate
-    def authenticate():
-        """Authenticate with Hive."""
-        try:
-            # pyhiveapi handles all the AWS signing internally
-            return hive.login(username, password)
-        except Exception as e:
-            _LOGGER.error("Failed to authenticate: %s", e)
-            return False
-    
     try:
-        success = await hass.async_add_executor_job(authenticate)
-        if not success:
-            raise ConfigEntryAuthFailed("Failed to authenticate with Hive")
-        _LOGGER.info("Successfully authenticated with Hive using pyhiveapi")
-    except ConfigEntryAuthFailed:
-        raise
+        devices = await hive.session.startSession(hive_config)
+        if not devices:
+            raise ConfigEntryAuthFailed("Failed to start Hive session")
+        _LOGGER.info("Successfully authenticated with Hive using apyhiveapi")
     except Exception as e:
         _LOGGER.error("Authentication error: %s", e)
         raise ConfigEntryAuthFailed(f"Authentication failed: {e}")
@@ -130,30 +128,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info("Setting schedule for %s on node %s", day, node_id)
         
         # Build schedule with ONLY the selected day
-        schedule_data = {
-            "schedule": {
-                day: [
-                    build_schedule_entry(entry["time"], entry["temp"])
-                    for entry in day_schedule
-                ]
-            }
-        }
+        schedule_entries = [
+            build_schedule_entry(entry["time"], entry["temp"])
+            for entry in day_schedule
+        ]
         
-        # Update schedule using pyhiveapi
-        def update_schedule():
-            """Update the schedule using pyhiveapi."""
-            try:
-                # pyhiveapi's heating object should have update methods
-                # We'll use the direct API method
-                result = hive.heating.set_schedule(node_id, schedule_data)
-                return result
-            except Exception as e:
-                _LOGGER.error("Error updating schedule: %s", e)
-                raise HomeAssistantError(f"Failed to update schedule: {e}")
-        
-        await hass.async_add_executor_job(update_schedule)
-        
-        _LOGGER.info("Successfully updated %s schedule", day)
+        # Update schedule using apyhiveapi
+        try:
+            # Use the heating API to update the schedule
+            result = await hive.heating.setSchedule(node_id, day, schedule_entries)
+            if not result:
+                raise HomeAssistantError("Failed to update schedule - API returned False")
+            _LOGGER.info("Successfully updated %s schedule", day)
+        except Exception as e:
+            _LOGGER.error("Error updating schedule: %s", e)
+            raise HomeAssistantError(f"Failed to update schedule: {e}")
     
     hass.services.async_register(
         DOMAIN,
