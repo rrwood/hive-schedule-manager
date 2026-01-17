@@ -11,7 +11,6 @@ from botocore.exceptions import ClientError
 
 from homeassistant import config_entries
 from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
-from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
 
 from .const import (
@@ -36,7 +35,6 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._password = None
         self._session_token = None
         self._cognito = None
-        self._mfa_verified = False
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -47,6 +45,11 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             self._username = user_input[CONF_USERNAME]
             self._password = user_input[CONF_PASSWORD]
+
+            # Check if already configured
+            existing_entry = await self.async_set_unique_id(self._username.lower())
+            if existing_entry:
+                self._abort_if_unique_id_configured()
 
             try:
                 # Try to authenticate
@@ -61,8 +64,6 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 elif result.get("success"):
                     # Success without MFA
                     _LOGGER.info("Authentication successful without MFA")
-                    await self.async_set_unique_id(self._username)
-                    self._abort_if_unique_id_configured()
                     
                     return self.async_create_entry(
                         title=self._username,
@@ -74,12 +75,12 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 else:
                     errors["base"] = "invalid_auth"
 
-            except CannotConnect:
-                errors["base"] = "cannot_connect"
             except InvalidAuth:
                 errors["base"] = "invalid_auth"
-            except Exception:
-                _LOGGER.exception("Unexpected exception")
+            except CannotConnect:
+                errors["base"] = "cannot_connect"
+            except Exception as ex:
+                _LOGGER.exception("Unexpected exception in user step: %s", ex)
                 errors["base"] = "unknown"
 
         return self.async_show_form(
@@ -107,14 +108,10 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
                 
                 if result.get("success"):
-                    # MFA verified successfully - we can now create the entry
-                    _LOGGER.info("MFA verification successful, creating config entry")
-                    self._mfa_verified = True
+                    # MFA verified successfully
+                    _LOGGER.info("MFA verified, creating config entry")
                     
-                    await self.async_set_unique_id(self._username)
-                    self._abort_if_unique_id_configured()
-                    
-                    # Create entry with just credentials - tokens will be obtained on first use
+                    # Create the config entry
                     return self.async_create_entry(
                         title=self._username,
                         data={
@@ -126,8 +123,8 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     _LOGGER.warning("MFA verification failed")
                     errors["base"] = "invalid_mfa"
 
-            except Exception:
-                _LOGGER.exception("Unexpected exception during MFA verification")
+            except Exception as ex:
+                _LOGGER.exception("Exception during MFA verification: %s", ex)
                 errors["base"] = "unknown"
 
         return self.async_show_form(
@@ -179,7 +176,7 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 raise CannotConnect
                 
         except Exception as err:
-            _LOGGER.exception("Unexpected exception during auth")
+            _LOGGER.exception("Unexpected exception during auth: %s", err)
             raise CannotConnect
 
     def _verify_mfa(self, mfa_code: str) -> dict[str, Any]:
@@ -206,8 +203,6 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # Check if we got authentication result
             if 'AuthenticationResult' in response:
                 _LOGGER.info("MFA verification successful - tokens received")
-                # Don't store tokens here - they'll be fresh when integration starts
-                # Just confirm MFA worked
                 return {"success": True}
             else:
                 _LOGGER.warning("MFA response did not contain authentication result")
@@ -224,7 +219,7 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return {"success": False}
             
         except Exception as err:
-            _LOGGER.exception("Unexpected error during MFA verification")
+            _LOGGER.exception("Unexpected error during MFA verification: %s", err)
             return {"success": False}
 
 
