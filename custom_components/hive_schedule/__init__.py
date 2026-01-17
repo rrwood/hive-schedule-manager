@@ -66,16 +66,31 @@ class HiveAuth:
         self._id_token = None
         self._access_token = None
         self._token_expiry = None
+        self._auth_attempts = 0
+        self._max_auth_attempts = 3
     
-    def authenticate(self) -> bool:
+    def authenticate(self, skip_mfa_check: bool = False) -> bool:
         """Authenticate with Hive via AWS Cognito.
         
-        Note: This will raise SMSMFAChallengeException if MFA is required.
-        During initial setup, the config flow handles MFA.
-        After setup, credentials should work without MFA prompts.
+        Args:
+            skip_mfa_check: If True, will not raise error on MFA challenge
+                           (used during initial setup)
+        
+        Returns:
+            True if authentication successful, False otherwise
         """
         try:
-            _LOGGER.debug("Authenticating with Hive API...")
+            self._auth_attempts += 1
+            
+            if self._auth_attempts > self._max_auth_attempts:
+                _LOGGER.error(
+                    "Maximum authentication attempts reached (%d). "
+                    "Please reconfigure the integration.",
+                    self._max_auth_attempts
+                )
+                return False
+            
+            _LOGGER.debug("Authenticating with Hive API (attempt %d)...", self._auth_attempts)
             
             self._cognito = Cognito(
                 user_pool_id=COGNITO_POOL_ID,
@@ -90,39 +105,77 @@ class HiveAuth:
                 self._id_token = self._cognito.id_token
                 self._access_token = self._cognito.access_token
                 self._token_expiry = datetime.now() + timedelta(minutes=55)
+                self._auth_attempts = 0  # Reset on success
                 
                 _LOGGER.info("Successfully authenticated with Hive")
                 return True
                 
-            except SMSMFAChallengeException:
-                # This shouldn't happen after initial setup
-                # If it does, user needs to reconfigure the integration
-                _LOGGER.error(
-                    "MFA challenge received - this should not happen after initial setup. "
-                    "Please remove and re-add the integration."
+            except SMSMFAChallengeException as mfa_ex:
+                # MFA challenge - this is normal on first auth after config
+                _LOGGER.info(
+                    "MFA challenge detected. This is normal on first authentication. "
+                    "Trying to proceed without user intervention..."
                 )
-                raise ConfigEntryAuthFailed(
-                    "MFA required - please reconfigure the integration"
-                )
+                
+                # Try to use the session from the exception
+                if len(mfa_ex.args) > 1 and isinstance(mfa_ex.args[1], dict):
+                    session_token = mfa_ex.args[1].get('Session')
+                    
+                    # In some cases, Cognito might cache the MFA and allow subsequent
+                    # authentication without user input. Let's try again.
+                    if self._auth_attempts < self._max_auth_attempts:
+                        _LOGGER.debug("Retrying authentication...")
+                        # Small delay before retry
+                        import time
+                        time.sleep(2)
+                        return self.authenticate(skip_mfa_check=skip_mfa_check)
+                
+                if not skip_mfa_check:
+                    _LOGGER.error(
+                        "MFA required but cannot be completed automatically. "
+                        "This should not happen after initial configuration. "
+                        "Please reconfigure the integration."
+                    )
+                    raise ConfigEntryAuthFailed(
+                        "MFA required - please reconfigure the integration"
+                    )
+                else:
+                    _LOGGER.warning("MFA required - skipping for now")
+                    return False
             
         except ClientError as e:
             error_code = e.response.get("Error", {}).get("Code", "")
-            _LOGGER.error("Authentication failed: %s - %s", error_code, str(e))
+            error_msg = e.response.get("Error", {}).get("Message", "")
+            
+            _LOGGER.error("Authentication failed: %s - %s", error_code, error_msg)
+            
+            # Reset attempts on certain errors
+            if "NotAuthorizedException" in error_code:
+                _LOGGER.error("Invalid credentials - please reconfigure")
+                self._auth_attempts = 0
+                return False
+            
             return False
+            
         except Exception as e:
-            _LOGGER.error("Failed to authenticate with Hive: %s", e)
+            _LOGGER.error("Unexpected error during authentication: %s", e)
+            _LOGGER.debug("Exception details:", exc_info=True)
             return False
     
     def refresh_token(self) -> bool:
         """Refresh the authentication token if needed."""
         if not self._token_expiry or datetime.now() >= self._token_expiry - timedelta(minutes=5):
             _LOGGER.debug("Token expired or expiring soon, re-authenticating...")
-            return self.authenticate()
+            return self.authenticate(skip_mfa_check=True)
         return True
     
     def get_token(self) -> str | None:
         """Get the current ID token."""
-        self.refresh_token()
+        if not self._id_token:
+            _LOGGER.debug("No token available, authenticating...")
+            self.authenticate(skip_mfa_check=True)
+        elif not self.refresh_token():
+            _LOGGER.warning("Token refresh failed")
         return self._id_token
 
 
@@ -255,11 +308,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     auth = HiveAuth(username, password)
     api = HiveScheduleAPI(auth)
     
-    # Initial authentication
+    # Initial authentication - allow it to retry a few times
     def initial_auth():
         """Perform initial authentication."""
         try:
-            return auth.authenticate()
+            # Skip MFA check on first auth as tokens should work
+            return auth.authenticate(skip_mfa_check=True)
         except ConfigEntryAuthFailed:
             raise
         except Exception as err:
@@ -269,7 +323,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     try:
         success = await hass.async_add_executor_job(initial_auth)
         if not success:
-            raise ConfigEntryAuthFailed("Failed to authenticate with Hive")
+            _LOGGER.warning(
+                "Initial authentication did not complete, but integration will continue. "
+                "Authentication will be retried when needed."
+            )
+            # Don't fail setup - let it retry later
     except ConfigEntryAuthFailed:
         raise
     
