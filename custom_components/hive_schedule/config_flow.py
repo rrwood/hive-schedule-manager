@@ -46,11 +46,6 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._username = user_input[CONF_USERNAME]
             self._password = user_input[CONF_PASSWORD]
 
-            # Check if already configured
-            existing_entry = await self.async_set_unique_id(self._username.lower())
-            if existing_entry:
-                self._abort_if_unique_id_configured()
-
             try:
                 # Try to authenticate
                 result = await self.hass.async_add_executor_job(
@@ -62,8 +57,12 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     _LOGGER.info("MFA required, proceeding to MFA step")
                     return await self.async_step_mfa()
                 elif result.get("success"):
-                    # Success without MFA
+                    # Success without MFA - check if already configured and create entry
                     _LOGGER.info("Authentication successful without MFA")
+                    
+                    # Check for duplicates
+                    await self.async_set_unique_id(self._username.lower())
+                    self._abort_if_unique_id_configured()
                     
                     return self.async_create_entry(
                         title=self._username,
@@ -108,8 +107,12 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
                 
                 if result.get("success"):
-                    # MFA verified successfully
+                    # MFA verified successfully - check for duplicates and create entry
                     _LOGGER.info("MFA verified, creating config entry")
+                    
+                    # Check for duplicates only after successful MFA
+                    await self.async_set_unique_id(self._username.lower())
+                    self._abort_if_unique_id_configured()
                     
                     # Create the config entry
                     return self.async_create_entry(
