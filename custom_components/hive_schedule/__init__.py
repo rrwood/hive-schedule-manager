@@ -1,11 +1,12 @@
 """
 Hive Schedule Manager Integration for Home Assistant
 Standalone with config flow and MFA support.
-Version: 1.1.0
+Version: 1.1.16 (Enhanced Debug)
 """
 from __future__ import annotations
 
 import logging
+import json
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -41,7 +42,7 @@ _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_SCAN_INTERVAL = timedelta(minutes=30)
 
-# Service schema
+# Service schemas
 SET_DAY_SCHEMA = vol.Schema({
     vol.Required(ATTR_NODE_ID): cv.string,
     vol.Required(ATTR_DAY): vol.In([
@@ -53,6 +54,10 @@ SET_DAY_SCHEMA = vol.Schema({
         vol.Required("time"): cv.string,
         vol.Required("temp"): vol.Coerce(float),
     }])
+})
+
+GET_SCHEDULE_SCHEMA = vol.Schema({
+    vol.Required(ATTR_NODE_ID): cv.string,
 })
 
 
@@ -173,6 +178,13 @@ class HiveScheduleAPI:
         h, m = map(int, time_str.split(":"))
         return h * 60 + m
     
+    @staticmethod
+    def minutes_to_time(minutes: int) -> str:
+        """Convert minutes from midnight to time string."""
+        hours = minutes // 60
+        mins = minutes % 60
+        return f"{hours:02d}:{mins:02d}"
+    
     def build_schedule_entry(self, time_str: str, temp: float) -> dict[str, Any]:
         """Build a single schedule entry in beekeeper format."""
         return {
@@ -180,7 +192,116 @@ class HiveScheduleAPI:
             "start": self.time_to_minutes(time_str)
         }
     
-    def update_schedule(self, node_id: str, schedule_data: dict[str, Any]) -> bool:
+    def _log_api_call(self, method: str, url: str, headers: dict, payload: dict | None = None) -> None:
+        """Log detailed API call information for debugging."""
+        _LOGGER.debug("=" * 80)
+        _LOGGER.debug("API CALL DEBUG INFO")
+        _LOGGER.debug("=" * 80)
+        _LOGGER.debug("Method: %s", method)
+        _LOGGER.debug("URL: %s", url)
+        _LOGGER.debug("-" * 80)
+        _LOGGER.debug("Headers:")
+        # Sanitize authorization header for logging
+        safe_headers = headers.copy()
+        if "Authorization" in safe_headers:
+            token = safe_headers["Authorization"]
+            if len(token) > 20:
+                safe_headers["Authorization"] = f"{token[:10]}...{token[-10:]}"
+        for key, value in safe_headers.items():
+            _LOGGER.debug("  %s: %s", key, value)
+        _LOGGER.debug("-" * 80)
+        if payload:
+            _LOGGER.debug("Payload (JSON):")
+            _LOGGER.debug("%s", json.dumps(payload, indent=2))
+        _LOGGER.debug("=" * 80)
+    
+    def get_current_schedule(self, node_id: str) -> dict[str, Any] | None:
+        """Retrieve the current schedule from Hive for a specific node."""
+        # Get fresh token
+        token = self.auth.get_id_token()
+        
+        if not token:
+            _LOGGER.error("Cannot get schedule: No auth token available")
+            raise HomeAssistantError("Failed to authenticate with Hive")
+        
+        # Update session header with current token
+        self.session.headers["Authorization"] = token
+        
+        url = f"{self.BASE_URL}/nodes/heating/{node_id}"
+        
+        try:
+            # Log the API call details
+            self._log_api_call("GET", url, self.session.headers)
+            
+            _LOGGER.info("Retrieving current schedule from %s", url)
+            response = self.session.get(url, timeout=30)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            _LOGGER.debug("Response status: %s", response.status_code)
+            _LOGGER.debug("Response data: %s", json.dumps(data, indent=2))
+            
+            # Extract schedule if present
+            if "schedule" in data:
+                schedule = data["schedule"]
+                _LOGGER.info("✓ Successfully retrieved schedule for node %s", node_id)
+                
+                # Convert schedule to readable format
+                readable_schedule = {}
+                for day, entries in schedule.items():
+                    readable_schedule[day] = [
+                        {
+                            "time": self.minutes_to_time(entry["start"]),
+                            "temp": entry["value"]["target"]
+                        }
+                        for entry in entries
+                    ]
+                
+                _LOGGER.info("Current schedule (readable format):")
+                _LOGGER.info("%s", json.dumps(readable_schedule, indent=2))
+                
+                return data
+            else:
+                _LOGGER.warning("No schedule found in response")
+                return None
+                
+        except requests.exceptions.HTTPError as err:
+            if err.response.status_code == 401:
+                _LOGGER.error("Authentication failed (401)")
+                _LOGGER.error("Response: %s", err.response.text[:200] if hasattr(err.response, 'text') else 'no response')
+                
+                # Try to refresh token and retry once
+                _LOGGER.info("Attempting to refresh token and retry...")
+                if self.auth.refresh_token():
+                    token = self.auth.get_id_token()
+                    self.session.headers["Authorization"] = token
+                    try:
+                        self._log_api_call("GET", url, self.session.headers)
+                        response = self.session.get(url, timeout=30)
+                        response.raise_for_status()
+                        data = response.json()
+                        _LOGGER.info("✓ Successfully retrieved schedule after token refresh")
+                        return data
+                    except Exception as retry_err:
+                        _LOGGER.error("Retry failed: %s", retry_err)
+                
+                raise HomeAssistantError("Hive authentication failed") from err
+            if err.response.status_code == 404:
+                _LOGGER.error("Node ID not found: %s", node_id)
+                raise HomeAssistantError(f"Invalid node ID: {node_id}") from err
+            _LOGGER.error("HTTP error retrieving schedule: %s", err)
+            if hasattr(err.response, 'text'):
+                _LOGGER.error("Response: %s", err.response.text[:500])
+            raise HomeAssistantError(f"Failed to retrieve schedule: {err}") from err
+        except requests.exceptions.Timeout as err:
+            _LOGGER.error("Request to Hive API timed out")
+            raise HomeAssistantError("Hive API request timed out") from err
+        except requests.exceptions.RequestException as err:
+            _LOGGER.error("Request error retrieving schedule: %s", err)
+            raise HomeAssistantError(f"Failed to retrieve schedule: {err}") from err
+    
+    def update_schedule(self, node_id: str, schedule_data: dict[str, Any], read_before_write: bool = True) -> bool:
         """Send schedule update to Hive using beekeeper-uk API."""
         # Get fresh token
         token = self.auth.get_id_token()
@@ -192,13 +313,33 @@ class HiveScheduleAPI:
         # Update session header with current token
         self.session.headers["Authorization"] = token
         
+        # Read current schedule before writing if requested
+        if read_before_write:
+            _LOGGER.info("Reading current schedule before writing...")
+            try:
+                current_schedule = self.get_current_schedule(node_id)
+                if current_schedule and "schedule" in current_schedule:
+                    _LOGGER.info("Current schedule retrieved successfully")
+                    _LOGGER.debug("Current full schedule: %s", json.dumps(current_schedule.get("schedule"), indent=2))
+            except Exception as e:
+                _LOGGER.warning("Failed to read current schedule before writing: %s", e)
+                _LOGGER.info("Continuing with update anyway...")
+        
         url = f"{self.BASE_URL}/nodes/heating/{node_id}"
         
         try:
-            _LOGGER.debug("Sending schedule update to %s", url)
-            _LOGGER.debug("Schedule data: %s", schedule_data)
+            # Log the API call details
+            self._log_api_call("POST", url, self.session.headers, schedule_data)
+            
+            _LOGGER.info("Sending schedule update to %s", url)
+            _LOGGER.debug("Schedule data: %s", json.dumps(schedule_data, indent=2))
+            
             response = self.session.post(url, json=schedule_data, timeout=30)
             response.raise_for_status()
+            
+            _LOGGER.debug("Response status: %s", response.status_code)
+            _LOGGER.debug("Response text: %s", response.text[:500] if hasattr(response, 'text') else 'no response')
+            
             _LOGGER.info("✓ Successfully updated Hive schedule for node %s", node_id)
             return True
         except requests.exceptions.HTTPError as err:
@@ -212,6 +353,7 @@ class HiveScheduleAPI:
                     token = self.auth.get_id_token()
                     self.session.headers["Authorization"] = token
                     try:
+                        self._log_api_call("POST", url, self.session.headers, schedule_data)
                         response = self.session.post(url, json=schedule_data, timeout=30)
                         response.raise_for_status()
                         _LOGGER.info("✓ Successfully updated Hive schedule after token refresh")
@@ -238,7 +380,7 @@ class HiveScheduleAPI:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Hive Schedule Manager from a config entry."""
     
-    _LOGGER.info("Setting up Hive Schedule Manager v1.1.0")
+    _LOGGER.info("Setting up Hive Schedule Manager v1.1.16 (Enhanced Debug)")
     
     # Initialize authentication and API
     auth = HiveAuth(hass, entry)
@@ -267,6 +409,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(
         async_track_time_interval(hass, refresh_token_periodic, DEFAULT_SCAN_INTERVAL)
     )
+    
+    # Service: Get current schedule
+    async def handle_get_schedule(call: ServiceCall) -> None:
+        """Handle get_schedule service call - retrieves current schedule."""
+        node_id = call.data[ATTR_NODE_ID]
+        
+        _LOGGER.info("Getting current schedule for node %s", node_id)
+        
+        try:
+            schedule_data = await hass.async_add_executor_job(
+                api.get_current_schedule, node_id
+            )
+            
+            if schedule_data:
+                _LOGGER.info("Successfully retrieved schedule for node %s", node_id)
+                # You can also fire an event with the schedule data if needed
+                hass.bus.async_fire(
+                    f"{DOMAIN}_schedule_retrieved",
+                    {
+                        "node_id": node_id,
+                        "schedule": schedule_data.get("schedule"),
+                    }
+                )
+            else:
+                _LOGGER.warning("No schedule data returned for node %s", node_id)
+        except Exception as err:
+            _LOGGER.error("Failed to get schedule: %s", err)
+            raise
     
     # Service: Set day schedule
     async def handle_set_day(call: ServiceCall) -> None:
@@ -310,11 +480,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             }
         }
         
-        # Send updated schedule to Hive
-        await hass.async_add_executor_job(api.update_schedule, node_id, schedule_data)
+        # Send updated schedule to Hive (with read_before_write enabled by default)
+        await hass.async_add_executor_job(
+            api.update_schedule, node_id, schedule_data, True
+        )
         
         _LOGGER.info("Successfully updated %s schedule", day)
     
+    # Register services
     hass.services.async_register(
         DOMAIN,
         SERVICE_SET_DAY,
@@ -322,7 +495,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         schema=SET_DAY_SCHEMA
     )
     
+    hass.services.async_register(
+        DOMAIN,
+        "get_schedule",
+        handle_get_schedule,
+        schema=GET_SCHEDULE_SCHEMA
+    )
+    
     _LOGGER.info("Hive Schedule Manager setup complete")
+    _LOGGER.info("Available services: set_day_schedule, get_schedule")
     return True
 
 
@@ -333,5 +514,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Unregister services if this is the last entry
     if not hass.data[DOMAIN]:
         hass.services.async_remove(DOMAIN, SERVICE_SET_DAY)
+        hass.services.async_remove(DOMAIN, "get_schedule")
     
     return True

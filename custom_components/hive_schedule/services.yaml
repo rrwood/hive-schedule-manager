@@ -44,6 +44,18 @@ set_day_schedule:
       required: false
       example: '[{"time": "06:30", "temp": 18.0}, {"time": "22:00", "temp": 16.0}]'
 
+get_schedule:
+  name: Get Schedule
+  description: Retrieve the current heating schedule from Hive for a specific node
+  fields:
+    node_id:
+      name: Node ID
+      description: The Hive heating node ID
+      required: true
+      example: "d2708e98-f22f-483e-b590-9ddbd642a3b7"
+      selector:
+        text:
+
 refresh_token:
   name: Refresh Token
   description: Manually refresh the Hive authentication token
