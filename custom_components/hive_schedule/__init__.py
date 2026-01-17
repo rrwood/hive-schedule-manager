@@ -326,7 +326,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     
     # Service: Set day schedule
     async def handle_set_day(call: ServiceCall) -> None:
-        """Handle set_day_schedule service call - only updates the specified day."""
+        """Handle set_day_schedule service call - updates only the specified day."""
         node_id = call.data[ATTR_NODE_ID]
         day = call.data[ATTR_DAY].lower()
         profile = call.data.get(ATTR_PROFILE)
@@ -356,22 +356,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         
         _LOGGER.info("Setting schedule for %s on node %s", day, node_id)
         
-        # Get current schedule for all days
-        current_schedule = await hass.async_add_executor_job(
-            api.get_current_schedule, node_id
-        )
-        
-        # Update only the specified day
-        if "schedule" not in current_schedule:
-            current_schedule["schedule"] = {}
-        
-        current_schedule["schedule"][day] = [
-            api.build_schedule_entry(entry["time"], entry["temp"])
-            for entry in day_schedule
-        ]
+        # Build schedule with ONLY the selected day
+        schedule_data = {
+            "schedule": {
+                day: [
+                    api.build_schedule_entry(entry["time"], entry["temp"])
+                    for entry in day_schedule
+                ]
+            }
+        }
         
         # Send updated schedule to Hive
-        await hass.async_add_executor_job(api.update_schedule, node_id, current_schedule)
+        await hass.async_add_executor_job(api.update_schedule, node_id, schedule_data)
         
         _LOGGER.info("Successfully updated %s schedule", day)
     
