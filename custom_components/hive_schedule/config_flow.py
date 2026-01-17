@@ -11,9 +11,8 @@ from botocore.exceptions import ClientError
 
 from homeassistant import config_entries
 from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
-import homeassistant.helpers.config_validation as cv
 
 from .const import (
     DOMAIN,
@@ -26,73 +25,6 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 
-async def validate_auth(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
-    """Validate the user credentials and handle MFA if needed."""
-    
-    username = data[CONF_USERNAME]
-    password = data[CONF_PASSWORD]
-    mfa_code = data.get(CONF_MFA_CODE)
-    
-    def _authenticate():
-        """Perform authentication in executor."""
-        try:
-            cognito = Cognito(
-                user_pool_id=COGNITO_POOL_ID,
-                client_id=COGNITO_CLIENT_ID,
-                user_pool_region=COGNITO_REGION,
-                username=username
-            )
-            
-            if mfa_code:
-                # Complete MFA challenge
-                _LOGGER.debug("Attempting MFA verification")
-                cognito.authenticate(password=password)
-                # This shouldn't happen if MFA is required, but handle it
-                return {
-                    "title": username,
-                    "id_token": cognito.id_token,
-                    "access_token": cognito.access_token,
-                }
-            else:
-                # Initial authentication
-                try:
-                    cognito.authenticate(password=password)
-                    return {
-                        "title": username,
-                        "id_token": cognito.id_token,
-                        "access_token": cognito.access_token,
-                    }
-                except SMSMFAChallengeException as mfa_error:
-                    _LOGGER.debug("MFA required - SMS sent")
-                    # Extract session info
-                    session_token = None
-                    if len(mfa_error.args) > 1 and isinstance(mfa_error.args[1], dict):
-                        session_token = mfa_error.args[1].get('Session')
-                    
-                    return {
-                        "mfa_required": True,
-                        "session_token": session_token,
-                    }
-                    
-        except ClientError as err:
-            error_code = err.response.get("Error", {}).get("Code", "")
-            error_message = str(err)
-            
-            if "NotAuthorizedException" in error_code or "not authorized" in error_message.lower():
-                raise InvalidAuth
-            elif "UserNotFoundException" in error_code:
-                raise InvalidAuth
-            else:
-                _LOGGER.error("Cognito error: %s - %s", error_code, error_message)
-                raise CannotConnect
-                
-        except Exception as err:
-            _LOGGER.exception("Unexpected exception during auth")
-            raise CannotConnect
-    
-    return await hass.async_add_executor_job(_authenticate)
-
-
 class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Hive Schedule Manager."""
 
@@ -103,7 +35,7 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._username = None
         self._password = None
         self._session_token = None
-        self._mfa_required = False
+        self._cognito = None
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -116,37 +48,34 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._password = user_input[CONF_PASSWORD]
 
             try:
-                info = await validate_auth(
-                    self.hass,
-                    {
-                        CONF_USERNAME: self._username,
-                        CONF_PASSWORD: self._password,
-                    }
+                # Try to authenticate
+                result = await self.hass.async_add_executor_job(
+                    self._try_authenticate
                 )
                 
-                if info.get("mfa_required"):
-                    # Store session info and proceed to MFA step
-                    self._mfa_required = True
-                    self._session_token = info.get("session_token")
+                if result.get("mfa_required"):
+                    # MFA needed, go to MFA step
                     return await self.async_step_mfa()
-                else:
-                    # Success - no MFA needed
+                elif result.get("success"):
+                    # Success without MFA
                     await self.async_set_unique_id(self._username)
                     self._abort_if_unique_id_configured()
                     
                     return self.async_create_entry(
-                        title=info["title"],
+                        title=self._username,
                         data={
                             CONF_USERNAME: self._username,
                             CONF_PASSWORD: self._password,
                         }
                     )
+                else:
+                    errors["base"] = "invalid_auth"
 
             except CannotConnect:
                 errors["base"] = "cannot_connect"
             except InvalidAuth:
                 errors["base"] = "invalid_auth"
-            except Exception:  # pylint: disable=broad-except
+            except Exception:
                 _LOGGER.exception("Unexpected exception")
                 errors["base"] = "unknown"
 
@@ -170,49 +99,9 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             try:
                 # Verify MFA code
-                def _verify_mfa():
-                    try:
-                        cognito = Cognito(
-                            user_pool_id=COGNITO_POOL_ID,
-                            client_id=COGNITO_CLIENT_ID,
-                            user_pool_region=COGNITO_REGION,
-                            username=self._username
-                        )
-                        
-                        # First authenticate to trigger MFA
-                        try:
-                            cognito.authenticate(password=self._password)
-                        except SMSMFAChallengeException:
-                            pass  # Expected
-                        
-                        # Now respond to the SMS challenge
-                        client = cognito.client
-                        response = client.respond_to_auth_challenge(
-                            ClientId=COGNITO_CLIENT_ID,
-                            ChallengeName='SMS_MFA',
-                            Session=self._session_token,
-                            ChallengeResponses={
-                                'SMS_MFA_CODE': mfa_code,
-                                'USERNAME': self._username,
-                            }
-                        )
-                        
-                        if 'AuthenticationResult' in response:
-                            return {
-                                "success": True,
-                                "id_token": response['AuthenticationResult']['IdToken'],
-                                "access_token": response['AuthenticationResult']['AccessToken'],
-                            }
-                        else:
-                            return {"success": False}
-                            
-                    except ClientError as err:
-                        error_code = err.response.get("Error", {}).get("Code", "")
-                        if "CodeMismatchException" in error_code:
-                            return {"success": False, "error": "invalid_code"}
-                        raise
-                
-                result = await self.hass.async_add_executor_job(_verify_mfa)
+                result = await self.hass.async_add_executor_job(
+                    self._verify_mfa, mfa_code
+                )
                 
                 if result.get("success"):
                     # MFA verified successfully
@@ -229,9 +118,7 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 else:
                     errors["base"] = "invalid_mfa"
 
-            except CannotConnect:
-                errors["base"] = "cannot_connect"
-            except Exception:  # pylint: disable=broad-except
+            except Exception:
                 _LOGGER.exception("Unexpected exception during MFA")
                 errors["base"] = "unknown"
 
@@ -245,6 +132,78 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "username": self._username,
             },
         )
+
+    def _try_authenticate(self) -> dict[str, Any]:
+        """Try to authenticate - returns status dict."""
+        try:
+            self._cognito = Cognito(
+                user_pool_id=COGNITO_POOL_ID,
+                client_id=COGNITO_CLIENT_ID,
+                user_pool_region=COGNITO_REGION,
+                username=self._username
+            )
+            
+            try:
+                self._cognito.authenticate(password=self._password)
+                # Success without MFA
+                return {"success": True}
+                
+            except SMSMFAChallengeException as mfa_error:
+                _LOGGER.info("MFA required - SMS code sent")
+                # Extract session token
+                if len(mfa_error.args) > 1 and isinstance(mfa_error.args[1], dict):
+                    self._session_token = mfa_error.args[1].get('Session')
+                return {"mfa_required": True}
+                
+        except ClientError as err:
+            error_code = err.response.get("Error", {}).get("Code", "")
+            error_message = str(err)
+            
+            _LOGGER.error("Auth error: %s - %s", error_code, error_message)
+            
+            if "NotAuthorizedException" in error_code or "not authorized" in error_message.lower():
+                raise InvalidAuth
+            elif "UserNotFoundException" in error_code:
+                raise InvalidAuth
+            else:
+                raise CannotConnect
+                
+        except Exception as err:
+            _LOGGER.exception("Unexpected exception during auth")
+            raise CannotConnect
+
+    def _verify_mfa(self, mfa_code: str) -> dict[str, Any]:
+        """Verify MFA code - returns status dict."""
+        try:
+            if not self._cognito or not self._session_token:
+                _LOGGER.error("No MFA session available")
+                return {"success": False}
+            
+            client = self._cognito.client
+            response = client.respond_to_auth_challenge(
+                ClientId=COGNITO_CLIENT_ID,
+                ChallengeName='SMS_MFA',
+                Session=self._session_token,
+                ChallengeResponses={
+                    'SMS_MFA_CODE': mfa_code,
+                    'USERNAME': self._username,
+                }
+            )
+            
+            if 'AuthenticationResult' in response:
+                _LOGGER.info("MFA verification successful")
+                return {"success": True}
+            else:
+                _LOGGER.warning("MFA verification failed - no auth result")
+                return {"success": False}
+                
+        except ClientError as err:
+            error_code = err.response.get("Error", {}).get("Code", "")
+            _LOGGER.error("MFA verification error: %s", error_code)
+            return {"success": False}
+        except Exception as err:
+            _LOGGER.exception("Unexpected error during MFA verification")
+            return {"success": False}
 
 
 class CannotConnect(Exception):
