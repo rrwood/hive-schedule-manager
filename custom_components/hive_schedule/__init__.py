@@ -12,7 +12,6 @@ from typing import Any
 import voluptuous as vol
 import requests
 from pycognito import Cognito
-from pycognito.exceptions import SMSMFAChallengeException
 from botocore.exceptions import ClientError
 
 from homeassistant.config_entries import ConfigEntry
@@ -33,6 +32,10 @@ from .const import (
     ATTR_DAY,
     ATTR_SCHEDULE,
     ATTR_PROFILE,
+    CONF_ID_TOKEN,
+    CONF_ACCESS_TOKEN,
+    CONF_REFRESH_TOKEN,
+    CONF_TOKEN_EXPIRY,
 )
 from .schedule_profiles import get_profile, get_available_profiles, validate_custom_schedule
 
@@ -58,124 +61,107 @@ SET_DAY_SCHEMA = vol.Schema({
 class HiveAuth:
     """Handle Hive authentication via AWS Cognito."""
     
-    def __init__(self, username: str, password: str) -> None:
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         """Initialize Hive authentication."""
-        self.username = username
-        self.password = password
+        self.hass = hass
+        self.entry = entry
+        self.username = entry.data[CONF_USERNAME]
+        self.password = entry.data[CONF_PASSWORD]
         self._cognito = None
-        self._id_token = None
-        self._access_token = None
-        self._token_expiry = None
-        self._auth_attempts = 0
-        self._max_auth_attempts = 3
+        
+        # Load tokens from config entry if available
+        self._id_token = entry.data.get(CONF_ID_TOKEN)
+        self._access_token = entry.data.get(CONF_ACCESS_TOKEN)
+        self._refresh_token = entry.data.get(CONF_REFRESH_TOKEN)
+        
+        # Parse token expiry
+        expiry_str = entry.data.get(CONF_TOKEN_EXPIRY)
+        if expiry_str:
+            try:
+                self._token_expiry = datetime.fromisoformat(expiry_str)
+            except (ValueError, TypeError):
+                self._token_expiry = None
+        else:
+            self._token_expiry = None
     
-    def authenticate(self, skip_mfa_check: bool = False) -> bool:
-        """Authenticate with Hive via AWS Cognito.
-        
-        Args:
-            skip_mfa_check: If True, will not raise error on MFA challenge
-                           (used during initial setup)
-        
-        Returns:
-            True if authentication successful, False otherwise
-        """
+    def refresh_token(self) -> bool:
+        """Refresh the authentication token using refresh token."""
         try:
-            self._auth_attempts += 1
+            # Check if we need to refresh
+            if self._token_expiry and datetime.now() < self._token_expiry - timedelta(minutes=5):
+                _LOGGER.debug("Token still valid, no refresh needed")
+                return True
             
-            if self._auth_attempts > self._max_auth_attempts:
-                _LOGGER.error(
-                    "Maximum authentication attempts reached (%d). "
-                    "Please reconfigure the integration.",
-                    self._max_auth_attempts
-                )
+            if not self._refresh_token:
+                _LOGGER.warning("No refresh token available, cannot refresh")
                 return False
             
-            _LOGGER.debug("Authenticating with Hive API (attempt %d)...", self._auth_attempts)
+            _LOGGER.info("Refreshing authentication token...")
             
+            # Create Cognito instance
             self._cognito = Cognito(
                 user_pool_id=COGNITO_POOL_ID,
                 client_id=COGNITO_CLIENT_ID,
                 user_pool_region=COGNITO_REGION,
-                username=self.username
+                username=self.username,
+                id_token=self._id_token,
+                access_token=self._access_token,
+                refresh_token=self._refresh_token,
             )
             
-            try:
-                self._cognito.authenticate(password=self.password)
-                
-                self._id_token = self._cognito.id_token
-                self._access_token = self._cognito.access_token
-                self._token_expiry = datetime.now() + timedelta(minutes=55)
-                self._auth_attempts = 0  # Reset on success
-                
-                _LOGGER.info("Successfully authenticated with Hive")
-                return True
-                
-            except SMSMFAChallengeException as mfa_ex:
-                # MFA challenge - this is normal on first auth after config
-                _LOGGER.info(
-                    "MFA challenge detected. This is normal on first authentication. "
-                    "Trying to proceed without user intervention..."
-                )
-                
-                # Try to use the session from the exception
-                if len(mfa_ex.args) > 1 and isinstance(mfa_ex.args[1], dict):
-                    session_token = mfa_ex.args[1].get('Session')
-                    
-                    # In some cases, Cognito might cache the MFA and allow subsequent
-                    # authentication without user input. Let's try again.
-                    if self._auth_attempts < self._max_auth_attempts:
-                        _LOGGER.debug("Retrying authentication...")
-                        # Small delay before retry
-                        import time
-                        time.sleep(2)
-                        return self.authenticate(skip_mfa_check=skip_mfa_check)
-                
-                if not skip_mfa_check:
-                    _LOGGER.error(
-                        "MFA required but cannot be completed automatically. "
-                        "This should not happen after initial configuration. "
-                        "Please reconfigure the integration."
-                    )
-                    raise ConfigEntryAuthFailed(
-                        "MFA required - please reconfigure the integration"
-                    )
-                else:
-                    _LOGGER.warning("MFA required - skipping for now")
-                    return False
+            # Refresh tokens
+            self._cognito.renew_access_token()
+            
+            # Update stored tokens
+            self._id_token = self._cognito.id_token
+            self._access_token = self._cognito.access_token
+            self._token_expiry = datetime.now() + timedelta(minutes=55)
+            
+            # Save updated tokens to config entry
+            self._save_tokens()
+            
+            _LOGGER.info("Successfully refreshed authentication token")
+            return True
             
         except ClientError as e:
             error_code = e.response.get("Error", {}).get("Code", "")
-            error_msg = e.response.get("Error", {}).get("Message", "")
+            _LOGGER.error("Failed to refresh token: %s - %s", error_code, str(e))
             
-            _LOGGER.error("Authentication failed: %s - %s", error_code, error_msg)
-            
-            # Reset attempts on certain errors
+            # If refresh token is invalid, user needs to re-authenticate
             if "NotAuthorizedException" in error_code:
-                _LOGGER.error("Invalid credentials - please reconfigure")
-                self._auth_attempts = 0
-                return False
+                _LOGGER.error("Refresh token invalid - please reconfigure integration")
+                raise ConfigEntryAuthFailed("Refresh token expired - please reconfigure")
             
             return False
             
         except Exception as e:
-            _LOGGER.error("Unexpected error during authentication: %s", e)
-            _LOGGER.debug("Exception details:", exc_info=True)
+            _LOGGER.error("Error refreshing token: %s", e)
             return False
     
-    def refresh_token(self) -> bool:
-        """Refresh the authentication token if needed."""
-        if not self._token_expiry or datetime.now() >= self._token_expiry - timedelta(minutes=5):
-            _LOGGER.debug("Token expired or expiring soon, re-authenticating...")
-            return self.authenticate(skip_mfa_check=True)
-        return True
+    def _save_tokens(self) -> None:
+        """Save tokens to config entry."""
+        try:
+            new_data = dict(self.entry.data)
+            new_data[CONF_ID_TOKEN] = self._id_token
+            new_data[CONF_ACCESS_TOKEN] = self._access_token
+            new_data[CONF_REFRESH_TOKEN] = self._refresh_token
+            new_data[CONF_TOKEN_EXPIRY] = self._token_expiry.isoformat() if self._token_expiry else None
+            
+            self.hass.config_entries.async_update_entry(self.entry, data=new_data)
+            _LOGGER.debug("Saved updated tokens to config entry")
+        except Exception as e:
+            _LOGGER.error("Failed to save tokens: %s", e)
     
     def get_token(self) -> str | None:
         """Get the current ID token."""
         if not self._id_token:
-            _LOGGER.debug("No token available, authenticating...")
-            self.authenticate(skip_mfa_check=True)
-        elif not self.refresh_token():
+            _LOGGER.error("No ID token available - integration may need reconfiguration")
+            return None
+        
+        # Refresh if needed
+        if not self.refresh_token():
             _LOGGER.warning("Token refresh failed")
+        
         return self._id_token
 
 
@@ -191,7 +177,10 @@ class HiveScheduleAPI:
         """Get headers for API requests."""
         token = self.auth.get_token()
         if not token:
-            raise HomeAssistantError("No valid authentication token available")
+            raise HomeAssistantError(
+                "No valid authentication token available. "
+                "Please reconfigure the Hive Schedule Manager integration."
+            )
         
         return {
             "Content-Type": "application/json",
@@ -200,14 +189,7 @@ class HiveScheduleAPI:
         }
     
     def get_current_schedule(self, node_id: str) -> dict[str, Any]:
-        """Retrieve the current schedule for a node.
-        
-        Args:
-            node_id: The Hive node ID
-            
-        Returns:
-            Dictionary containing the current schedule for all days
-        """
+        """Retrieve the current schedule for a node."""
         try:
             url = f"{self.base_url}/nodes/{node_id}"
             headers = self._get_headers()
@@ -239,15 +221,7 @@ class HiveScheduleAPI:
             raise HomeAssistantError(f"Failed to get schedule: {err}") from err
     
     def build_schedule_entry(self, time: str, temp: float) -> dict[str, Any]:
-        """Build a single schedule entry in Hive format.
-        
-        Args:
-            time: Time in HH:MM format
-            temp: Temperature in Celsius
-            
-        Returns:
-            Dictionary in Hive schedule format
-        """
+        """Build a single schedule entry in Hive format."""
         hours, minutes = time.split(":")
         start_time = int(hours) * 60 + int(minutes)
         
@@ -260,12 +234,7 @@ class HiveScheduleAPI:
         }
     
     def update_schedule(self, node_id: str, schedule_data: dict[str, Any]) -> None:
-        """Update the heating schedule for a node.
-        
-        Args:
-            node_id: The Hive node ID
-            schedule_data: Complete schedule data in Hive format
-        """
+        """Update the heating schedule for a node."""
         try:
             url = f"{self.base_url}/nodes/{node_id}"
             headers = self._get_headers()
@@ -301,35 +270,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     
     _LOGGER.info("Setting up Hive Schedule Manager v1.1.0")
     
-    username = entry.data[CONF_USERNAME]
-    password = entry.data[CONF_PASSWORD]
-    
     # Initialize authentication and API
-    auth = HiveAuth(username, password)
+    auth = HiveAuth(hass, entry)
     api = HiveScheduleAPI(auth)
     
-    # Initial authentication - allow it to retry a few times
-    def initial_auth():
-        """Perform initial authentication."""
+    # Check if we have tokens
+    if not auth._id_token:
+        _LOGGER.warning(
+            "No authentication tokens found in config entry. "
+            "Integration may not work until reconfigured with MFA."
+        )
+    else:
+        _LOGGER.info("Loaded authentication tokens from config entry")
+        # Try to refresh token to ensure it's valid
+        def check_token():
+            return auth.refresh_token()
+        
         try:
-            # Skip MFA check on first auth as tokens should work
-            return auth.authenticate(skip_mfa_check=True)
+            await hass.async_add_executor_job(check_token)
         except ConfigEntryAuthFailed:
             raise
-        except Exception as err:
-            _LOGGER.error("Authentication error: %s", err)
-            return False
-    
-    try:
-        success = await hass.async_add_executor_job(initial_auth)
-        if not success:
-            _LOGGER.warning(
-                "Initial authentication did not complete, but integration will continue. "
-                "Authentication will be retried when needed."
-            )
-            # Don't fail setup - let it retry later
-    except ConfigEntryAuthFailed:
-        raise
     
     # Store in hass.data
     hass.data.setdefault(DOMAIN, {})
@@ -341,7 +301,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Set up periodic token refresh
     async def refresh_token_periodic(now=None):
         """Periodically refresh the authentication token."""
-        await hass.async_add_executor_job(auth.refresh_token)
+        try:
+            await hass.async_add_executor_job(auth.refresh_token)
+        except ConfigEntryAuthFailed:
+            _LOGGER.error("Token refresh failed - reconfiguration required")
     
     entry.async_on_unload(
         async_track_time_interval(hass, refresh_token_periodic, DEFAULT_SCAN_INTERVAL)
@@ -409,11 +372,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def handle_refresh_token(call: ServiceCall) -> None:
         """Manually refresh the Hive authentication token."""
         _LOGGER.info("Manual token refresh requested")
-        success = await hass.async_add_executor_job(auth.refresh_token)
-        if success:
-            _LOGGER.info("Token refresh successful")
-        else:
-            _LOGGER.error("Token refresh failed")
+        try:
+            success = await hass.async_add_executor_job(auth.refresh_token)
+            if success:
+                _LOGGER.info("Token refresh successful")
+            else:
+                _LOGGER.error("Token refresh failed")
+        except ConfigEntryAuthFailed:
+            _LOGGER.error("Token refresh failed - reconfiguration required")
     
     hass.services.async_register(DOMAIN, "refresh_token", handle_refresh_token)
     

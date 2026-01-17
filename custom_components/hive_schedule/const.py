@@ -9,6 +9,10 @@ COGNITO_REGION = "eu-west-1"
 
 # Configuration
 CONF_MFA_CODE = "mfa_code"
+CONF_ID_TOKEN = "id_token"
+CONF_ACCESS_TOKEN = "access_token"
+CONF_REFRESH_TOKEN = "refresh_token"
+CONF_TOKEN_EXPIRY = "token_expiry"
 
 # Service names
 SERVICE_SET_DAY = "set_day_schedule"

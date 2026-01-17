@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from datetime import datetime, timedelta
 
 import voluptuous as vol
 from pycognito import Cognito
@@ -19,6 +20,10 @@ from .const import (
     COGNITO_CLIENT_ID,
     COGNITO_REGION,
     CONF_MFA_CODE,
+    CONF_ID_TOKEN,
+    CONF_ACCESS_TOKEN,
+    CONF_REFRESH_TOKEN,
+    CONF_TOKEN_EXPIRY,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -35,6 +40,7 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._password = None
         self._session_token = None
         self._cognito = None
+        self._auth_result = None
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -57,7 +63,7 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     _LOGGER.info("MFA required, proceeding to MFA step")
                     return await self.async_step_mfa()
                 elif result.get("success"):
-                    # Success without MFA - create or update entry
+                    # Success without MFA
                     _LOGGER.info("Authentication successful without MFA")
                     return await self._create_or_update_entry()
                 else:
@@ -96,8 +102,9 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
                 
                 if result.get("success"):
-                    # MFA verified successfully - create or update entry
-                    _LOGGER.info("MFA verified, creating/updating config entry")
+                    # MFA verified successfully
+                    _LOGGER.info("MFA verified, storing tokens and creating entry")
+                    self._auth_result = result.get("auth_result")
                     return await self._create_or_update_entry()
                 else:
                     _LOGGER.warning("MFA verification failed")
@@ -120,6 +127,22 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def _create_or_update_entry(self) -> FlowResult:
         """Create a new entry or update existing one."""
+        # Prepare data to store
+        entry_data = {
+            CONF_USERNAME: self._username,
+            CONF_PASSWORD: self._password,
+        }
+        
+        # Add tokens if we have them from MFA
+        if self._auth_result:
+            entry_data[CONF_ID_TOKEN] = self._auth_result.get('IdToken', '')
+            entry_data[CONF_ACCESS_TOKEN] = self._auth_result.get('AccessToken', '')
+            entry_data[CONF_REFRESH_TOKEN] = self._auth_result.get('RefreshToken', '')
+            # Token expires in ~1 hour, store expiry time
+            expiry = (datetime.now() + timedelta(minutes=55)).isoformat()
+            entry_data[CONF_TOKEN_EXPIRY] = expiry
+            _LOGGER.debug("Stored authentication tokens in config entry")
+        
         # Check if entry already exists
         existing_entry = await self.async_set_unique_id(self._username.lower())
         
@@ -128,10 +151,7 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             _LOGGER.info("Updating existing config entry for %s", self._username)
             self.hass.config_entries.async_update_entry(
                 existing_entry,
-                data={
-                    CONF_USERNAME: self._username,
-                    CONF_PASSWORD: self._password,
-                }
+                data=entry_data
             )
             # Reload the entry to use new credentials
             await self.hass.config_entries.async_reload(existing_entry.entry_id)
@@ -141,10 +161,7 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         _LOGGER.info("Creating new config entry for %s", self._username)
         return self.async_create_entry(
             title=self._username,
-            data={
-                CONF_USERNAME: self._username,
-                CONF_PASSWORD: self._password,
-            }
+            data=entry_data
         )
 
     def _try_authenticate(self) -> dict[str, Any]:
@@ -159,8 +176,13 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             
             try:
                 self._cognito.authenticate(password=self._password)
-                # Success without MFA
+                # Success without MFA - store tokens
                 _LOGGER.info("Authentication successful without MFA")
+                self._auth_result = {
+                    'IdToken': self._cognito.id_token,
+                    'AccessToken': self._cognito.access_token,
+                    'RefreshToken': self._cognito.refresh_token,
+                }
                 return {"success": True}
                 
             except SMSMFAChallengeException as mfa_error:
@@ -189,7 +211,7 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             raise CannotConnect
 
     def _verify_mfa(self, mfa_code: str) -> dict[str, Any]:
-        """Verify MFA code - returns status dict."""
+        """Verify MFA code - returns status dict with tokens."""
         try:
             if not self._cognito or not self._session_token:
                 _LOGGER.error("No MFA session available for verification")
@@ -212,7 +234,10 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # Check if we got authentication result
             if 'AuthenticationResult' in response:
                 _LOGGER.info("MFA verification successful - tokens received")
-                return {"success": True}
+                return {
+                    "success": True,
+                    "auth_result": response['AuthenticationResult']
+                }
             else:
                 _LOGGER.warning("MFA response did not contain authentication result")
                 return {"success": False}
