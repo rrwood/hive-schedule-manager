@@ -6,13 +6,18 @@ Version: 1.1.0
 from __future__ import annotations
 
 import logging
+import json
 from datetime import datetime, timedelta
 from typing import Any
+from urllib.parse import urlparse
 
 import voluptuous as vol
 import requests
 from pycognito import Cognito
 from botocore.exceptions import ClientError
+from botocore.auth import SigV4Auth
+from botocore.awsrequest import AWSRequest
+import boto3
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
@@ -42,6 +47,9 @@ from .schedule_profiles import get_profile, get_available_profiles, validate_cus
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_SCAN_INTERVAL = timedelta(minutes=30)
+
+# Cognito Identity Pool ID for Hive (if we need AWS credentials)
+COGNITO_IDENTITY_POOL_ID = "eu-west-1:d235e7e0-bb62-4f74-980a-98e89519cba8"
 
 # Service schema
 SET_DAY_SCHEMA = vol.Schema({
@@ -74,6 +82,12 @@ class HiveAuth:
         self._access_token = entry.data.get(CONF_ACCESS_TOKEN)
         self._refresh_token = entry.data.get(CONF_REFRESH_TOKEN)
         
+        # AWS credentials for API signing
+        self._aws_access_key = None
+        self._aws_secret_key = None
+        self._aws_session_token = None
+        self._aws_credentials_expiry = None
+        
         # Parse token expiry
         expiry_str = entry.data.get(CONF_TOKEN_EXPIRY)
         if expiry_str:
@@ -83,6 +97,65 @@ class HiveAuth:
                 self._token_expiry = None
         else:
             self._token_expiry = None
+    
+    def get_aws_credentials(self) -> dict[str, str]:
+        """Get AWS credentials from Cognito Identity Pool."""
+        try:
+            # Check if we need to refresh AWS credentials
+            if (self._aws_credentials_expiry and 
+                datetime.now() < self._aws_credentials_expiry - timedelta(minutes=5) and
+                self._aws_access_key):
+                _LOGGER.debug("AWS credentials still valid")
+                return {
+                    'access_key': self._aws_access_key,
+                    'secret_key': self._aws_secret_key,
+                    'session_token': self._aws_session_token,
+                }
+            
+            _LOGGER.info("Getting AWS credentials from Cognito Identity Pool...")
+            
+            # Create Cognito Identity client
+            identity_client = boto3.client(
+                'cognito-identity',
+                region_name=COGNITO_REGION
+            )
+            
+            # Get Identity ID
+            identity_response = identity_client.get_id(
+                IdentityPoolId=COGNITO_IDENTITY_POOL_ID,
+                Logins={
+                    f'cognito-idp.{COGNITO_REGION}.amazonaws.com/{COGNITO_POOL_ID}': self._id_token
+                }
+            )
+            
+            identity_id = identity_response['IdentityId']
+            _LOGGER.debug("Got Identity ID: %s", identity_id[:20] + "...")
+            
+            # Get credentials for the identity
+            credentials_response = identity_client.get_credentials_for_identity(
+                IdentityId=identity_id,
+                Logins={
+                    f'cognito-idp.{COGNITO_REGION}.amazonaws.com/{COGNITO_POOL_ID}': self._id_token
+                }
+            )
+            
+            credentials = credentials_response['Credentials']
+            self._aws_access_key = credentials['AccessKeyId']
+            self._aws_secret_key = credentials['SecretKey']
+            self._aws_session_token = credentials['SessionToken']
+            self._aws_credentials_expiry = credentials['Expiration'].replace(tzinfo=None)
+            
+            _LOGGER.info("Successfully obtained AWS credentials")
+            
+            return {
+                'access_key': self._aws_access_key,
+                'secret_key': self._aws_secret_key,
+                'session_token': self._aws_session_token,
+            }
+            
+        except Exception as e:
+            _LOGGER.error("Failed to get AWS credentials: %s", e)
+            raise HomeAssistantError(f"Failed to get AWS credentials: {e}")
     
     def refresh_token(self) -> bool:
         """Refresh the authentication token using refresh token."""
@@ -173,8 +246,47 @@ class HiveScheduleAPI:
         self.auth = auth
         self.base_url = HIVE_API_URL
     
+    def _sign_request(self, method: str, url: str, body: str = None) -> dict[str, str]:
+        """Sign request with AWS Signature v4."""
+        try:
+            # Get AWS credentials
+            aws_creds = self.auth.get_aws_credentials()
+            
+            # Parse URL
+            parsed_url = urlparse(url)
+            
+            # Create AWS request
+            request = AWSRequest(
+                method=method,
+                url=url,
+                data=body,
+                headers={
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                }
+            )
+            
+            # Create credentials object for signing
+            from botocore.credentials import Credentials
+            credentials = Credentials(
+                access_key=aws_creds['access_key'],
+                secret_key=aws_creds['secret_key'],
+                token=aws_creds['session_token']
+            )
+            
+            # Sign the request
+            SigV4Auth(credentials, 'execute-api', COGNITO_REGION).add_auth(request)
+            
+            _LOGGER.debug("Request signed with AWS Signature v4")
+            
+            return dict(request.headers)
+            
+        except Exception as e:
+            _LOGGER.error("Failed to sign request: %s", e)
+            raise HomeAssistantError(f"Failed to sign request: {e}")
+    
     def _get_headers(self) -> dict[str, str]:
-        """Get headers for API requests."""
+        """Get headers for API requests - deprecated, use _sign_request."""
         token = self.auth.get_token()
         if not token:
             raise HomeAssistantError(
@@ -251,7 +363,6 @@ class HiveScheduleAPI:
         """Update the heating schedule for a node."""
         try:
             url = f"{self.base_url}/nodes/{node_id}"
-            headers = self._get_headers()
             
             payload = {
                 "nodes": [{
@@ -259,9 +370,21 @@ class HiveScheduleAPI:
                 }]
             }
             
-            _LOGGER.debug("Updating schedule at %s", url)
+            body = json.dumps(payload)
             
-            response = requests.put(url, headers=headers, json=payload, timeout=30)
+            _LOGGER.debug("Updating schedule at %s", url)
+            _LOGGER.debug("Payload: %s", payload)
+            
+            # Sign the request with AWS Signature v4
+            headers = self._sign_request('PUT', url, body)
+            
+            response = requests.put(url, headers=headers, data=body, timeout=30)
+            
+            # Log response details before raising for status
+            _LOGGER.debug("Response status: %d", response.status_code)
+            if response.status_code != 200:
+                _LOGGER.error("Response body: %s", response.text[:500])
+            
             response.raise_for_status()
             
             _LOGGER.info("Successfully updated schedule for node %s", node_id)
