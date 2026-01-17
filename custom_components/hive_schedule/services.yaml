@@ -1,27 +1,12 @@
-set_heating_schedule:
-  name: Set Heating Schedule
-  description: Update the complete weekly heating schedule for your Hive thermostat
+set_day_schedule:
+  name: Set Day Schedule
+  description: Update the heating schedule for a single day using a profile or custom schedule
   fields:
     node_id:
       name: Node ID
       description: The Hive heating node ID
       required: true
       example: "d2708e98-f22f-483e-b590-9ddbd642a3b7"
-      selector:
-        text:
-    schedule:
-      name: Schedule
-      description: Complete weekly schedule configuration
-      required: true
-
-set_day_schedule:
-  name: Set Day Schedule
-  description: Update the heating schedule for a single day
-  fields:
-    node_id:
-      name: Node ID
-      description: The Hive heating node ID
-      required: true
       selector:
         text:
     day:
@@ -38,30 +23,27 @@ set_day_schedule:
             - "friday"
             - "saturday"
             - "sunday"
-    schedule:
-      name: Schedule
-      description: Schedule entries for the day
-      required: true
-
-update_from_calendar:
-  name: Update from Calendar
-  description: Update tomorrow's schedule based on calendar
-  fields:
-    node_id:
-      name: Node ID
-      description: The Hive heating node ID
-      required: true
-      selector:
-        text:
-    is_workday:
-      name: Is Workday
-      description: Whether tomorrow is a work day
-      required: true
-      selector:
-        boolean:
-    wake_time:
-      name: Wake Time
-      description: Optional custom wake time (HH:MM format)
+    profile:
+      name: Profile
+      description: Pre-defined schedule profile to use
       required: false
       selector:
-        time:
+        select:
+          options:
+            - "weekday"
+            - "weekend"
+            - "holiday"
+            - "weekday_early"
+            - "weekday_late"
+            - "wfh"
+            - "away"
+            - "all_day_comfort"
+    schedule:
+      name: Custom Schedule
+      description: Custom schedule entries for the day (alternative to profile)
+      required: false
+      example: '[{"time": "06:30", "temp": 18.0}, {"time": "22:00", "temp": 16.0}]'
+
+refresh_token:
+  name: Refresh Token
+  description: Manually refresh the Hive authentication token

@@ -1,226 +1,227 @@
-# Hive Schedule Manager v2.0 - Standalone Version
+# Hive Schedule Manager v3.0
 
-## 🎉 Complete Rewrite - Now Independent!
+A Home Assistant custom integration for managing Hive heating schedules with support for schedule profiles and two-factor authentication.
 
-This version **does NOT depend** on the Hive integration. It handles its own authentication directly with the Hive API using AWS Cognito.
+## Features
 
-## Benefits
-
-✅ **No token expiry issues** - Automatically refreshes tokens every 30 minutes  
-✅ **Independent operation** - Doesn't rely on Hive integration's internal state  
-✅ **Reliable authentication** - Direct control over the auth lifecycle  
-✅ **Auto-retry** - Automatically retries with fresh token if auth fails  
+- **UI Configuration Flow**: Easy setup through Home Assistant UI with 2FA support
+- **Persistent Credentials**: Credentials stored securely, no need to re-enter 2FA on restart
+- **Schedule Profiles**: Pre-defined heating schedules for different scenarios
+- **Single Day Updates**: Update only the day you want without affecting other days
+- **Automatic Token Refresh**: Handles authentication token renewal automatically
 
 ## Installation
 
-### Step 1: Install Files
+### Via HACS (Recommended)
 
-Copy these files to `/config/custom_components/hive_schedule/`:
-- `__init__.py` (v2.0 - NEW standalone version)
-- `manifest.json` (v2.0 - updated dependencies)
-- `services.yaml`
-- `strings.json`
+1. Open HACS in Home Assistant
+2. Click on "Integrations"
+3. Click the three dots in the top right and select "Custom repositories"
+4. Add the repository URL: `https://github.com/rrwood/hive-schedule-manager`
+5. Select category: "Integration"
+6. Click "Add"
+7. Search for "Hive Schedule Manager" and install
+8. Restart Home Assistant
 
-### Step 2: Add Configuration
+### Manual Installation
 
-Add this to your `/config/configuration.yaml`:
+1. Download the latest release
+2. Copy the `hive_schedule` folder to your `custom_components` directory
+3. Restart Home Assistant
 
-```yaml
-hive_schedule:
-  username: "your-hive-email@example.com"
-  password: "your-hive-password"
-  scan_interval: 00:30:00  # Optional: token refresh interval (default: 30 minutes)
-```
+## Setup
 
-**Important**: Use the same username and password you use to log into the Hive app!
+1. Go to Settings → Devices & Services
+2. Click "+ Add Integration"
+3. Search for "Hive Schedule Manager"
+4. Enter your Hive account email and password
+5. If you have 2FA enabled, enter the verification code sent to your phone
+6. Click Submit
 
-### Step 3: Restart Home Assistant
+The integration will now be configured and ready to use!
 
-After adding the configuration, restart Home Assistant.
+## Usage
 
-## What to Expect
+### Service: `hive_schedule.set_day_schedule`
 
-After restart, check the logs for:
+Update the heating schedule for a specific day using either a pre-defined profile or a custom schedule.
 
-```
-INFO [custom_components.hive_schedule] Setting up Hive Schedule Manager (Standalone v2.0)
-INFO [custom_components.hive_schedule] ✓ Successfully authenticated with Hive (token expires in ~55 minutes)
-INFO [custom_components.hive_schedule] ✓ Hive Schedule Manager setup complete (Standalone v2.0)
-```
-
-## Testing
-
-### Find Your Node ID
-
-You'll still need your heating node ID. The easiest way is to check the Hive app or use the node ID we found earlier: `d2708e98-f22f-483e-b590-9ddbd642a3b7`
-
-### Test Service Call
-
-Go to **Developer Tools** → **Services**
-
-**Service:** `hive_schedule.set_day_schedule`
-
-**Service Data:**
-```yaml
-node_id: "d2708e98-f22f-483e-b590-9ddbd642a3b7"
-day: "friday"
-schedule:
-  - time: "07:00"
-    temp: 19.0
-  - time: "09:00"
-    temp: 16.0
-  - time: "17:00"
-    temp: 20.0
-  - time: "22:00"
-    temp: 16.0
-```
-
-Click "Call Service"
-
-### Expected Result
-
-In logs:
-```
-INFO [custom_components.hive_schedule] ✓ Successfully updated Hive schedule for node d2708e98-f22f-483e-b590-9ddbd642a3b7
-```
-
-In Hive app:
-- Check Friday's schedule - it should be updated!
-
-## Available Services
-
-### 1. `hive_schedule.set_day_schedule`
-Update a single day's heating schedule
+#### Using a Profile
 
 ```yaml
-node_id: "your-node-id"
-day: "monday"
-schedule:
-  - time: "06:30"
-    temp: 18.0
-  - time: "22:00"
-    temp: 16.0
+service: hive_schedule.set_day_schedule
+data:
+  node_id: "d2708e98-f22f-483e-b590-9ddbd642a3b7"
+  day: "monday"
+  profile: "weekday"
 ```
 
-### 2. `hive_schedule.set_heating_schedule`
-Update the complete weekly schedule
+#### Using a Custom Schedule
 
 ```yaml
-node_id: "your-node-id"
-schedule:
-  monday:
-    - time: "06:30"
+service: hive_schedule.set_day_schedule
+data:
+  node_id: "d2708e98-f22f-483e-b590-9ddbd642a3b7"
+  day: "saturday"
+  schedule:
+    - time: "08:00"
       temp: 18.0
     - time: "22:00"
       temp: 16.0
-  tuesday:
-    - time: "06:30"
-      temp: 18.0
-  # ... other days
 ```
 
-### 3. `hive_schedule.update_from_calendar`
-Update tomorrow's schedule based on calendar
+### Available Profiles
 
-```yaml
-node_id: "your-node-id"
-is_workday: true
-wake_time: "06:30"  # optional
-```
+- **weekday**: Standard workday schedule (early rise, away during day, evening warmup)
+- **weekend**: Relaxed weekend schedule (later start, comfortable all day)
+- **holiday**: Holiday schedule (relaxed timing, extended evening)
+- **weekday_early**: Early start workday (5:30 AM warmup)
+- **weekday_late**: Late return workday (6:30 PM warmup)
+- **wfh**: Work from home schedule (comfortable all day)
+- **away**: Minimal heating for frost protection
+- **all_day_comfort**: Constant comfortable temperature
 
-### 4. `hive_schedule.refresh_token`
-Manually refresh authentication token (usually not needed)
+### Finding Your Node ID
 
-No parameters needed - just call it.
+The easiest way to find your Hive thermostat's node ID is to:
 
-## Token Management
+1. Go to Developer Tools → States
+2. Find your Hive climate entity (e.g., `climate.heating`)
+3. Look for the `node_id` attribute in the entity's attributes
 
-- Tokens are **automatically refreshed** every 30 minutes (configurable)
-- If a token expires mid-request, it **automatically retries** with a fresh token
-- No more "token expired" errors!
+Alternatively, check the diagnostic logs when the integration starts up - it will show available Hive nodes.
 
-## Troubleshooting
+## Example Automations
 
-### "Initial authentication failed"
-- Check your username and password in `configuration.yaml`
-- Make sure you're using your Hive app credentials
-- Check that your Hive account is active
-
-### "Invalid node ID" (404 error)
-- The node ID is wrong
-- Try the one we found: `d2708e98-f22f-483e-b590-9ddbd642a3b7`
-- Or check your Hive devices in the app
-
-### Integration doesn't load
-- Check `/config/configuration.yaml` for syntax errors
-- Make sure username and password are quoted strings
-- Check logs for error messages
-
-## Configuration Options
-
-```yaml
-hive_schedule:
-  username: "required"              # Your Hive email
-  password: "required"              # Your Hive password
-  scan_interval: "00:30:00"         # Optional: How often to refresh tokens
-                                    # Format: HH:MM:SS
-                                    # Default: 30 minutes
-                                    # Minimum: 5 minutes recommended
-```
-
-## Example Automation
-
-Update heating schedule based on calendar events:
+### Set Weekday Schedule
 
 ```yaml
 automation:
-  - alias: "Update heating from calendar"
+  - alias: "Set Weekday Heating Schedule"
     trigger:
       - platform: time
-        at: "22:00:00"  # 10 PM each evening
+        at: "00:01:00"
+    condition:
+      - condition: time
+        weekday:
+          - mon
+          - tue
+          - wed
+          - thu
+          - fri
     action:
-      - service: hive_schedule.update_from_calendar
+      - service: hive_schedule.set_day_schedule
         data:
-          node_id: "d2708e98-f22f-483e-b590-9ddbd642a3b7"
-          is_workday: "{{ is_state('binary_sensor.workday_sensor', 'on') }}"
+          node_id: "your-node-id-here"
+          day: "{{ now().strftime('%A').lower() }}"
+          profile: "weekday"
 ```
 
-## Security Note
-
-Your Hive credentials are stored in `configuration.yaml`. Make sure:
-- Your Home Assistant instance is secure
-- You use secrets if sharing your config
-- Your `configuration.yaml` is not publicly accessible
-
-You can use secrets like this:
+### Set Weekend Schedule
 
 ```yaml
-# secrets.yaml
-hive_username: "your-email@example.com"
-hive_password: "your-password"
-
-# configuration.yaml
-hive_schedule:
-  username: !secret hive_username
-  password: !secret hive_password
+automation:
+  - alias: "Set Weekend Heating Schedule"
+    trigger:
+      - platform: time
+        at: "00:01:00"
+    condition:
+      - condition: time
+        weekday:
+          - sat
+          - sun
+    action:
+      - service: hive_schedule.set_day_schedule
+        data:
+          node_id: "your-node-id-here"
+          day: "{{ now().strftime('%A').lower() }}"
+          profile: "weekend"
 ```
 
-## What Changed from v1.x
+### Custom Schedule Based on Calendar
 
-| Feature | v1.x (Dependent) | v2.0 (Standalone) |
-|---------|------------------|-------------------|
-| Depends on Hive integration | ✅ Required | ❌ Independent |
-| Token expiry issues | ❌ Yes | ✅ No |
-| Configuration needed | ❌ No | ✅ Yes (credentials) |
-| Token refresh | ❌ Manual/unreliable | ✅ Automatic |
-| Auto-retry on 401 | ❌ No | ✅ Yes |
+```yaml
+automation:
+  - alias: "Adjust Heating for Early Meeting"
+    trigger:
+      - platform: calendar
+        event: start
+        entity_id: calendar.work
+        offset: "-12:00:00"
+    condition:
+      - condition: template
+        value_template: "{{ '07:00' in trigger.calendar_event.summary.lower() }}"
+    action:
+      - service: hive_schedule.set_day_schedule
+        data:
+          node_id: "your-node-id-here"
+          day: "{{ (now() + timedelta(hours=12)).strftime('%A').lower() }}"
+          profile: "weekday_early"
+```
+
+## Customizing Profiles
+
+To customize the schedule profiles, edit the `schedule_profiles.py` file in the integration directory. Each profile is defined as a list of time/temperature pairs:
+
+```python
+PROFILES = {
+    "my_custom_profile": [
+        {"time": "06:00", "temp": 19.0},
+        {"time": "09:00", "temp": 17.0},
+        {"time": "17:00", "temp": 20.0},
+        {"time": "23:00", "temp": 16.0},
+    ],
+}
+```
+
+After editing, restart Home Assistant for changes to take effect.
+
+## Troubleshooting
+
+### Authentication Issues
+
+If you're having trouble authenticating:
+
+1. Verify your Hive credentials are correct
+2. Check that 2FA is enabled on your Hive account if prompted
+3. Try removing and re-adding the integration
+4. Check the Home Assistant logs for detailed error messages
+
+### Service Not Updating Schedule
+
+If the service call completes but the schedule doesn't update:
+
+1. Verify the node_id is correct
+2. Check that the time format is HH:MM (24-hour format)
+3. Ensure temperatures are between 5°C and 32°C
+4. Check Home Assistant logs for API errors
+
+### Token Refresh Issues
+
+The integration automatically refreshes tokens every 30 minutes. If you experience authentication issues:
+
+1. Use the `hive_schedule.refresh_token` service to manually refresh
+2. Check logs for token refresh errors
+3. If issues persist, remove and re-add the integration
 
 ## Support
 
-If you have issues:
-1. Check logs for error messages
-2. Verify your credentials work in the Hive app
-3. Try the `refresh_token` service
-4. Check that your node ID is correct
+For issues, feature requests, or questions:
+- GitHub Issues: https://github.com/rrwood/hive-schedule-manager/issues
 
-This version should be rock-solid! 🎉
+## Changelog
+
+### v3.0.0
+- Added UI configuration flow with 2FA support
+- Credentials now stored securely (no re-authentication on restart)
+- Added schedule profile system
+- Fixed `set_day_schedule` to only update specified day
+- Removed unused services (set_heating_schedule, update_from_calendar)
+- Improved error handling and logging
+
+### v2.0.0
+- Added 2FA support (required each restart)
+- Standalone authentication
+
+### v1.0.0
+- Initial release

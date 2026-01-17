@@ -1,17 +1,40 @@
 {
-  "title": "Hive Schedule Manager",
-  "services": {
-    "set_heating_schedule": {
-      "name": "Set heating schedule",
-      "description": "Update the complete weekly heating schedule."
+  "config": {
+    "step": {
+      "user": {
+        "title": "Hive Schedule Manager",
+        "description": "Enter your Hive account credentials",
+        "data": {
+          "username": "Email",
+          "password": "Password"
+        }
+      },
+      "mfa": {
+        "title": "Two-Factor Authentication",
+        "description": "Enter the verification code sent to your phone for {username}",
+        "data": {
+          "mfa_code": "Verification Code"
+        }
+      }
     },
+    "error": {
+      "cannot_connect": "Failed to connect to Hive API",
+      "invalid_auth": "Invalid email or password",
+      "invalid_mfa": "Invalid verification code",
+      "unknown": "Unexpected error occurred"
+    },
+    "abort": {
+      "already_configured": "This Hive account is already configured"
+    }
+  },
+  "services": {
     "set_day_schedule": {
       "name": "Set day schedule",
-      "description": "Update the heating schedule for a single day."
+      "description": "Update the heating schedule for a single day using a profile or custom schedule."
     },
-    "update_from_calendar": {
-      "name": "Update from calendar",
-      "description": "Update tomorrow's schedule based on calendar."
+    "refresh_token": {
+      "name": "Refresh token",
+      "description": "Manually refresh the Hive authentication token."
     }
   }
 }
