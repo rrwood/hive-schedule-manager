@@ -1,7 +1,7 @@
 """
 Hive Schedule Manager Integration for Home Assistant
 Standalone with config flow and MFA support.
-Version: 1.1.16 (Enhanced Debug)
+Version: 1.1.17 (Enhanced Debug + Readable Schedules)
 """
 from __future__ import annotations
 
@@ -174,6 +174,13 @@ class HiveScheduleAPI:
         h, m = map(int, time_str.split(":"))
         return h * 60 + m
     
+    @staticmethod
+    def minutes_to_time(minutes: int) -> str:
+        """Convert minutes from midnight to time string."""
+        hours = minutes // 60
+        mins = minutes % 60
+        return f"{hours:02d}:{mins:02d}"
+    
     def build_schedule_entry(self, time_str: str, temp: float) -> dict[str, Any]:
         """Build a single schedule entry in beekeeper format."""
         return {
@@ -204,6 +211,26 @@ class HiveScheduleAPI:
             _LOGGER.debug("%s", json.dumps(payload, indent=2))
         _LOGGER.debug("=" * 80)
     
+    def _format_schedule_readable(self, schedule_data: dict) -> None:
+        """Format and log schedule data in a human-readable way."""
+        if not schedule_data or "schedule" not in schedule_data:
+            return
+        
+        schedule = schedule_data["schedule"]
+        
+        _LOGGER.info("=" * 80)
+        _LOGGER.info("SCHEDULE IN READABLE FORMAT")
+        _LOGGER.info("=" * 80)
+        
+        for day, entries in schedule.items():
+            _LOGGER.info(f"{day.upper()}:")
+            for entry in entries:
+                time_str = self.minutes_to_time(entry["start"])
+                temp = entry["value"]["target"]
+                _LOGGER.info(f"  {time_str} → {temp}°C")
+        
+        _LOGGER.info("=" * 80)
+    
     def update_schedule(self, node_id: str, schedule_data: dict[str, Any]) -> bool:
         """Send schedule update to Hive using beekeeper-uk API."""
         # Get fresh token
@@ -229,7 +256,15 @@ class HiveScheduleAPI:
             response.raise_for_status()
             
             _LOGGER.debug("Response status: %s", response.status_code)
-            _LOGGER.debug("Response text: %s", response.text[:500] if hasattr(response, 'text') else 'no response')
+            _LOGGER.debug("Response text: %s", response.text[:2000] if hasattr(response, 'text') else 'no response')
+            
+            # Parse and format the response to show what was actually set
+            try:
+                response_data = response.json()
+                _LOGGER.info("Response from Hive API (showing what was set):")
+                self._format_schedule_readable(response_data)
+            except Exception as e:
+                _LOGGER.debug(f"Could not parse response for readable format: {e}")
             
             _LOGGER.info("✓ Successfully updated Hive schedule for node %s", node_id)
             return True
@@ -248,6 +283,14 @@ class HiveScheduleAPI:
                         response = self.session.post(url, json=schedule_data, timeout=30)
                         response.raise_for_status()
                         _LOGGER.info("✓ Successfully updated Hive schedule after token refresh")
+                        
+                        # Log readable format on retry too
+                        try:
+                            response_data = response.json()
+                            self._format_schedule_readable(response_data)
+                        except:
+                            pass
+                        
                         return True
                     except Exception as retry_err:
                         _LOGGER.error("Retry failed: %s", retry_err)
@@ -271,7 +314,7 @@ class HiveScheduleAPI:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Hive Schedule Manager from a config entry."""
     
-    _LOGGER.info("Setting up Hive Schedule Manager v1.1.16 (Enhanced Debug)")
+    _LOGGER.info("Setting up Hive Schedule Manager v1.1.17 (Enhanced Debug + Readable Schedules)")
     
     # Initialize authentication and API
     auth = HiveAuth(hass, entry)
@@ -356,6 +399,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     
     _LOGGER.info("Hive Schedule Manager setup complete")
+    _LOGGER.info("TIP: After setting schedules, check logs for readable format!")
     return True
 
 
