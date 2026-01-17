@@ -1,12 +1,12 @@
 {
   "domain": "hive_schedule",
   "name": "Hive Schedule Manager",
-  "version": "3.0.0",
+  "version": "1.1.0",
   "documentation": "https://github.com/rrwood/hive-schedule-manager",
   "issue_tracker": "https://github.com/rrwood/hive-schedule-manager/issues",
   "codeowners": ["@rrwood"],
   "config_flow": true,
   "dependencies": [],
-  "requirements": ["requests>=2.31.0", "pycognito>=2024.5.1"],
+  "requirements": ["requests>=2.31.0", "pycognito>=2024.5.1", "pyhiveapi>=0.5.15"],
   "iot_class": "cloud_polling"
 }
