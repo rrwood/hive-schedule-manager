@@ -45,8 +45,8 @@ set_day_schedule:
       example: '[{"time": "06:30", "temp": 18.0}, {"time": "22:00", "temp": 16.0}]'
 
 get_schedule:
-  name: Get Schedule
-  description: Retrieve the current heating schedule from Hive for a specific node
+  name: Get Current Schedule
+  description: Retrieve the CURRENT heating schedule from Hive (reads master schedule from Hive, not local state)
   fields:
     node_id:
       name: Node ID
