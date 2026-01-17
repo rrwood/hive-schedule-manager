@@ -182,11 +182,15 @@ class HiveScheduleAPI:
                 "Please reconfigure the Hive Schedule Manager integration."
             )
         
-        return {
+        headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "authorization": token,
+            "Authorization": token,  # Capital A - Hive API might be case-sensitive
         }
+        
+        _LOGGER.debug("Request headers: %s", {k: v[:20] + "..." if k == "authorization" else v for k, v in headers.items()})
+        
+        return headers
     
     def get_current_schedule(self, node_id: str) -> dict[str, Any]:
         """Retrieve the current schedule for a node."""
@@ -197,6 +201,12 @@ class HiveScheduleAPI:
             _LOGGER.debug("Getting current schedule from %s", url)
             
             response = requests.get(url, headers=headers, timeout=30)
+            
+            # Log response details before raising for status
+            _LOGGER.debug("Response status: %d", response.status_code)
+            if response.status_code != 200:
+                _LOGGER.error("Response body: %s", response.text[:500])
+            
             response.raise_for_status()
             
             data = response.json()
@@ -212,6 +222,10 @@ class HiveScheduleAPI:
             
         except requests.exceptions.HTTPError as err:
             _LOGGER.error("HTTP error getting schedule: %s", err)
+            if hasattr(err, 'response') and err.response is not None:
+                _LOGGER.error("Response status: %d", err.response.status_code)
+                _LOGGER.error("Response headers: %s", dict(err.response.headers))
+                _LOGGER.error("Response body: %s", err.response.text[:500])
             raise HomeAssistantError(f"Failed to get schedule: {err}") from err
         except requests.exceptions.Timeout:
             _LOGGER.error("Request timeout getting schedule")
