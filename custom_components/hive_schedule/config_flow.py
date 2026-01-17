@@ -57,20 +57,9 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     _LOGGER.info("MFA required, proceeding to MFA step")
                     return await self.async_step_mfa()
                 elif result.get("success"):
-                    # Success without MFA - check if already configured and create entry
+                    # Success without MFA - create or update entry
                     _LOGGER.info("Authentication successful without MFA")
-                    
-                    # Check for duplicates
-                    await self.async_set_unique_id(self._username.lower())
-                    self._abort_if_unique_id_configured()
-                    
-                    return self.async_create_entry(
-                        title=self._username,
-                        data={
-                            CONF_USERNAME: self._username,
-                            CONF_PASSWORD: self._password,
-                        }
-                    )
+                    return await self._create_or_update_entry()
                 else:
                     errors["base"] = "invalid_auth"
 
@@ -107,21 +96,9 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
                 
                 if result.get("success"):
-                    # MFA verified successfully - check for duplicates and create entry
-                    _LOGGER.info("MFA verified, creating config entry")
-                    
-                    # Check for duplicates only after successful MFA
-                    await self.async_set_unique_id(self._username.lower())
-                    self._abort_if_unique_id_configured()
-                    
-                    # Create the config entry
-                    return self.async_create_entry(
-                        title=self._username,
-                        data={
-                            CONF_USERNAME: self._username,
-                            CONF_PASSWORD: self._password,
-                        }
-                    )
+                    # MFA verified successfully - create or update entry
+                    _LOGGER.info("MFA verified, creating/updating config entry")
+                    return await self._create_or_update_entry()
                 else:
                     _LOGGER.warning("MFA verification failed")
                     errors["base"] = "invalid_mfa"
@@ -139,6 +116,35 @@ class HiveScheduleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders={
                 "username": self._username,
             },
+        )
+
+    async def _create_or_update_entry(self) -> FlowResult:
+        """Create a new entry or update existing one."""
+        # Check if entry already exists
+        existing_entry = await self.async_set_unique_id(self._username.lower())
+        
+        if existing_entry:
+            # Update existing entry
+            _LOGGER.info("Updating existing config entry for %s", self._username)
+            self.hass.config_entries.async_update_entry(
+                existing_entry,
+                data={
+                    CONF_USERNAME: self._username,
+                    CONF_PASSWORD: self._password,
+                }
+            )
+            # Reload the entry to use new credentials
+            await self.hass.config_entries.async_reload(existing_entry.entry_id)
+            return self.async_abort(reason="reauth_successful")
+        
+        # Create new entry
+        _LOGGER.info("Creating new config entry for %s", self._username)
+        return self.async_create_entry(
+            title=self._username,
+            data={
+                CONF_USERNAME: self._username,
+                CONF_PASSWORD: self._password,
+            }
         )
 
     def _try_authenticate(self) -> dict[str, Any]:
