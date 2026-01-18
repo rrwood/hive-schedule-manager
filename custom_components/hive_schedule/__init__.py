@@ -1,7 +1,7 @@
 """
 Hive Schedule Manager Integration for Home Assistant
 Standalone with config flow and MFA support.
-Version: 1.2.0 (Enhanced Debug + AWS SigV4 GET Support)
+Version: 1.2.1 (GET Support - Fresh Headers Fix)
 """
 from __future__ import annotations
 
@@ -425,35 +425,55 @@ class HiveScheduleAPI:
         return data
     
     def _get_with_bearer(self, url: str, node_id: str) -> dict[str, Any]:
-        """GET request with bearer token."""
+        """GET request with ID token - matching web app format exactly."""
         token = self.auth.get_id_token()
         
         if not token:
             raise HomeAssistantError("No auth token available")
         
-        headers = self.session.headers.copy()
-        headers["Authorization"] = token
+        # Use fresh headers matching the web app exactly
+        headers = {
+            "Accept": "*/*",
+            "Content-Type": "application/json",
+            "Origin": "https://my.hivehome.com",
+            "Referer": "https://my.hivehome.com/",
+            "Authorization": token,  # ID token directly, no "Bearer " prefix
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache"
+        }
         
         self._log_api_call("GET", url, headers)
         
-        response = self.session.get(url, headers=headers, timeout=30)
+        _LOGGER.info("=" * 60)
+        _LOGGER.info("GET REQUEST v1.2.1 - Using fresh headers matching web app")
+        _LOGGER.info("=" * 60)
         
-        if response.status_code == 403:
-            _LOGGER.error("GET request forbidden - AWS credentials may be required")
-            _LOGGER.error("Response: %s", response.text[:500])
-            raise HomeAssistantError(
-                "GET requests require AWS Signature V4. "
-                "Could not extract AWS credentials from Cognito tokens. "
-                "This is a limitation of the Hive API."
-            )
-        
-        response.raise_for_status()
-        
-        data = response.json()
-        _LOGGER.info("✓ Successfully retrieved schedule using bearer token")
-        self._format_schedule_readable(data, "CURRENT SCHEDULE FROM HIVE")
-        
-        return data
+        try:
+            response = self.session.get(url, headers=headers, timeout=30)
+            
+            _LOGGER.debug("GET Response status: %s", response.status_code)
+            _LOGGER.debug("GET Response text: %s", response.text[:500] if hasattr(response, 'text') else 'no response')
+            
+            if response.status_code == 403:
+                _LOGGER.error("GET request forbidden (403)")
+                _LOGGER.error("Response: %s", response.text[:500])
+                raise HomeAssistantError(
+                    "GET request forbidden - authentication issue"
+                )
+            
+            response.raise_for_status()
+            
+            data = response.json()
+            _LOGGER.info("✓ Successfully retrieved schedule using ID token!")
+            self._format_schedule_readable(data, "CURRENT SCHEDULE FROM HIVE (Master Source)")
+            
+            return data
+            
+        except requests.exceptions.HTTPError as err:
+            _LOGGER.error("HTTP error on GET: %s", err)
+            if hasattr(err.response, 'text'):
+                _LOGGER.error("Error response: %s", err.response.text[:500])
+            raise
     
     def update_schedule(self, node_id: str, schedule_data: dict[str, Any]) -> bool:
         """Send schedule update to Hive using beekeeper-uk API."""
@@ -537,7 +557,14 @@ class HiveScheduleAPI:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Hive Schedule Manager from a config entry."""
     
-    _LOGGER.info("Setting up Hive Schedule Manager v1.2.0 (AWS SigV4 + GET Support)")
+    _LOGGER.info("=" * 80)
+    _LOGGER.info("=" * 80)
+    _LOGGER.info("  HIVE SCHEDULE MANAGER v1.2.1")
+    _LOGGER.info("  GET REQUEST FIX - FRESH HEADERS")
+    _LOGGER.info("  IF YOU SEE 'AWS CREDENTIALS REQUIRED' ERROR, FILE NOT LOADED!")
+    _LOGGER.info("=" * 80)
+    _LOGGER.info("=" * 80)
+    _LOGGER.info("Hive Schedule Manager v1.2.1 - GET Support with Fresh Headers Fix")
     
     # Initialize authentication and API
     auth = HiveAuth(hass, entry)
