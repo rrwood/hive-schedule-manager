@@ -1,22 +1,19 @@
 """
 Hive Schedule Manager Integration for Home Assistant
-Standalone with config flow and MFA support.
-Version: 1.2.1 (GET Support - Fresh Headers Fix)
+Version: 1.1.17 (Production - POST only, YAML profiles)
 """
 from __future__ import annotations
 
 import logging
 import json
-import hashlib
-import hmac
+import os
 from datetime import datetime, timedelta
 from typing import Any
-from urllib.parse import urlparse
 
 import voluptuous as vol
 import requests
+import yaml
 from pycognito import Cognito
-from jose import jwt
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
@@ -40,29 +37,185 @@ from .const import (
     CONF_REFRESH_TOKEN,
     CONF_TOKEN_EXPIRY,
 )
-from .schedule_profiles import get_profile, get_available_profiles, validate_custom_schedule
 
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_SCAN_INTERVAL = timedelta(minutes=30)
+PROFILES_FILE = "hive_schedule_profiles.yaml"
 
-# Service schemas
-SET_DAY_SCHEMA = vol.Schema({
-    vol.Required(ATTR_NODE_ID): cv.string,
-    vol.Required(ATTR_DAY): vol.In([
-        "monday", "tuesday", "wednesday", "thursday", 
-        "friday", "saturday", "sunday"
-    ]),
-    vol.Optional(ATTR_PROFILE): vol.In(get_available_profiles()),
-    vol.Optional(ATTR_SCHEDULE): vol.All(cv.ensure_list, [{
-        vol.Required("time"): cv.string,
-        vol.Required("temp"): vol.Coerce(float),
-    }])
-})
+# Service schema with dynamic profile loading
+def _get_set_day_schema(hass: HomeAssistant) -> vol.Schema:
+    """Get schema with available profiles."""
+    profiles = _load_profiles(hass)
+    return vol.Schema({
+        vol.Required(ATTR_NODE_ID): cv.string,
+        vol.Required(ATTR_DAY): vol.In([
+            "monday", "tuesday", "wednesday", "thursday", 
+            "friday", "saturday", "sunday"
+        ]),
+        vol.Optional(ATTR_PROFILE): vol.In(list(profiles.keys())),
+        vol.Optional(ATTR_SCHEDULE): vol.All(cv.ensure_list, [{
+            vol.Required("time"): cv.string,
+            vol.Required("temp"): vol.Coerce(float),
+        }])
+    })
 
-GET_SCHEDULE_SCHEMA = vol.Schema({
-    vol.Required(ATTR_NODE_ID): cv.string,
-})
+
+def _load_profiles(hass: HomeAssistant) -> dict:
+    """Load schedule profiles from YAML file."""
+    config_path = hass.config.path(PROFILES_FILE)
+    
+    # Create default profiles file if it doesn't exist
+    if not os.path.exists(config_path):
+        _LOGGER.info("Creating default profiles file: %s", config_path)
+        _create_default_profiles_file(config_path)
+    
+    try:
+        with open(config_path, 'r') as file:
+            profiles = yaml.safe_load(file) or {}
+            _LOGGER.debug("Loaded %d profiles from %s", len(profiles), PROFILES_FILE)
+            return profiles
+    except Exception as e:
+        _LOGGER.error("Failed to load profiles from %s: %s", PROFILES_FILE, e)
+        return _get_builtin_profiles()
+
+
+def _get_builtin_profiles() -> dict:
+    """Get built-in default profiles as fallback."""
+    return {
+        "weekday": [
+            {"time": "06:30", "temp": 18.0},
+            {"time": "08:00", "temp": 16.0},
+            {"time": "16:30", "temp": 19.5},
+            {"time": "21:30", "temp": 16.0},
+        ],
+        "weekend": [
+            {"time": "07:30", "temp": 18.0},
+            {"time": "09:00", "temp": 19.0},
+            {"time": "22:00", "temp": 16.0},
+        ],
+        "holiday": [
+            {"time": "08:00", "temp": 18.0},
+            {"time": "22:30", "temp": 16.0},
+        ],
+        "away": [
+            {"time": "00:00", "temp": 12.0},
+        ],
+    }
+
+
+def _create_default_profiles_file(config_path: str) -> None:
+    """Create default profiles YAML file."""
+    default_content = """# Hive Schedule Profiles
+# Edit this file to customize your heating schedules
+# Each profile is a list of time/temperature pairs
+# Time format: "HH:MM" (24-hour)
+# Temperature: Celsius (5.0 - 32.0)
+
+weekday:
+  - time: "06:30"
+    temp: 18.0
+  - time: "08:00"
+    temp: 16.0
+  - time: "16:30"
+    temp: 19.5
+  - time: "21:30"
+    temp: 16.0
+
+weekend:
+  - time: "07:30"
+    temp: 18.0
+  - time: "09:00"
+    temp: 19.0
+  - time: "22:00"
+    temp: 16.0
+
+holiday:
+  - time: "08:00"
+    temp: 18.0
+  - time: "22:30"
+    temp: 16.0
+
+weekday_early:
+  - time: "05:30"
+    temp: 18.0
+  - time: "07:00"
+    temp: 16.0
+  - time: "16:30"
+    temp: 19.5
+  - time: "21:30"
+    temp: 16.0
+
+weekday_late:
+  - time: "06:30"
+    temp: 18.0
+  - time: "08:00"
+    temp: 16.0
+  - time: "18:30"
+    temp: 19.5
+  - time: "23:00"
+    temp: 16.0
+
+wfh:
+  - time: "06:30"
+    temp: 18.0
+  - time: "09:00"
+    temp: 19.0
+  - time: "17:00"
+    temp: 19.5
+  - time: "22:00"
+    temp: 16.0
+
+away:
+  - time: "00:00"
+    temp: 12.0
+
+all_day_comfort:
+  - time: "00:00"
+    temp: 19.0
+"""
+    
+    try:
+        with open(config_path, 'w') as file:
+            file.write(default_content)
+        _LOGGER.info("Created default profiles file at %s", config_path)
+    except Exception as e:
+        _LOGGER.error("Failed to create default profiles file: %s", e)
+
+
+def _validate_schedule(schedule: list) -> bool:
+    """Validate a schedule format."""
+    if not isinstance(schedule, list):
+        raise ValueError("Schedule must be a list")
+    
+    if len(schedule) == 0:
+        raise ValueError("Schedule must have at least one entry")
+    
+    for entry in schedule:
+        if not isinstance(entry, dict):
+            raise ValueError("Each schedule entry must be a dictionary")
+        
+        if "time" not in entry or "temp" not in entry:
+            raise ValueError("Each entry must have 'time' and 'temp' keys")
+        
+        # Validate time format (HH:MM)
+        time_str = entry["time"]
+        try:
+            hours, minutes = time_str.split(":")
+            if not (0 <= int(hours) <= 23 and 0 <= int(minutes) <= 59):
+                raise ValueError
+        except (ValueError, AttributeError):
+            raise ValueError(f"Invalid time format: {time_str}. Must be HH:MM")
+        
+        # Validate temperature
+        try:
+            temp = float(entry["temp"])
+            if not (5.0 <= temp <= 32.0):
+                raise ValueError(f"Temperature {temp}°C out of range (5-32°C)")
+        except (ValueError, TypeError):
+            raise ValueError(f"Invalid temperature: {entry['temp']}")
+    
+    return True
 
 
 class HiveAuth:
@@ -90,49 +243,6 @@ class HiveAuth:
                 self._token_expiry = None
         else:
             self._token_expiry = None
-        
-        # AWS credentials from tokens
-        self._aws_access_key = None
-        self._aws_secret_key = None
-        self._aws_session_token = None
-        self._extract_aws_credentials()
-    
-    def _extract_aws_credentials(self) -> None:
-        """Extract AWS credentials from Cognito tokens."""
-        try:
-            if self._id_token:
-                # Decode the ID token (don't verify signature, just extract claims)
-                decoded = jwt.get_unverified_claims(self._id_token)
-                _LOGGER.debug("ID Token claims: %s", list(decoded.keys()))
-                
-                # Try to find AWS credentials in the token
-                # Cognito tokens may contain identityId which we can use
-                if 'cognito:username' in decoded:
-                    _LOGGER.debug("Found Cognito username in token")
-                
-                # Check if we have AWS credentials in access token
-                if self._access_token:
-                    access_decoded = jwt.get_unverified_claims(self._access_token)
-                    _LOGGER.debug("Access Token claims: %s", list(access_decoded.keys()))
-                    
-                    # Look for AWS credentials
-                    for key in ['aws_access_key', 'AccessKeyId', 'access_key']:
-                        if key in access_decoded:
-                            self._aws_access_key = access_decoded[key]
-                            _LOGGER.info("Found AWS access key in token")
-                    
-                    for key in ['aws_secret_key', 'SecretAccessKey', 'secret_key']:
-                        if key in access_decoded:
-                            self._aws_secret_key = access_decoded[key]
-                            _LOGGER.info("Found AWS secret key in token")
-                    
-                    for key in ['aws_session_token', 'SessionToken', 'session_token']:
-                        if key in access_decoded:
-                            self._aws_session_token = access_decoded[key]
-                            _LOGGER.info("Found AWS session token")
-        
-        except Exception as e:
-            _LOGGER.debug("Could not extract AWS credentials from tokens: %s", e)
     
     def refresh_token(self) -> bool:
         """Refresh the authentication token using refresh token."""
@@ -166,9 +276,6 @@ class HiveAuth:
             self._id_token = self._cognito.id_token
             self._access_token = self._cognito.access_token
             self._token_expiry = datetime.now() + timedelta(minutes=55)
-            
-            # Try to extract AWS credentials from new tokens
-            self._extract_aws_credentials()
             
             # Save updated tokens to config entry
             self._save_tokens()
@@ -204,99 +311,6 @@ class HiveAuth:
         self.refresh_token()
         
         return self._id_token
-    
-    def has_aws_credentials(self) -> bool:
-        """Check if we have AWS credentials."""
-        return bool(self._aws_access_key and self._aws_secret_key)
-
-
-class AWSV4Signer:
-    """AWS Signature Version 4 request signer."""
-    
-    def __init__(self, access_key: str, secret_key: str, session_token: str | None, region: str, service: str):
-        """Initialize the signer."""
-        self.access_key = access_key
-        self.secret_key = secret_key
-        self.session_token = session_token
-        self.region = region
-        self.service = service
-    
-    @staticmethod
-    def _sign(key: bytes, msg: str) -> bytes:
-        """HMAC-SHA256 signing."""
-        return hmac.new(key, msg.encode('utf-8'), hashlib.sha256).digest()
-    
-    def _get_signature_key(self, date_stamp: str) -> bytes:
-        """Derive the signing key."""
-        k_date = self._sign(f"AWS4{self.secret_key}".encode('utf-8'), date_stamp)
-        k_region = self._sign(k_date, self.region)
-        k_service = self._sign(k_region, self.service)
-        k_signing = self._sign(k_service, 'aws4_request')
-        return k_signing
-    
-    def sign_request(self, method: str, url: str, headers: dict, payload: str = '') -> dict:
-        """Sign an HTTP request with AWS Signature Version 4."""
-        # Parse URL
-        parsed = urlparse(url)
-        host = parsed.netloc
-        canonical_uri = parsed.path if parsed.path else '/'
-        canonical_querystring = parsed.query if parsed.query else ''
-        
-        # Create timestamp
-        t = datetime.utcnow()
-        amz_date = t.strftime('%Y%m%dT%H%M%SZ')
-        date_stamp = t.strftime('%Y%m%d')
-        
-        # Build canonical headers
-        headers_to_sign = {'host': host, 'x-amz-date': amz_date}
-        
-        # Add session token if available
-        if self.session_token:
-            headers_to_sign['x-amz-security-token'] = self.session_token
-        
-        # Add content-type if present
-        if 'Content-Type' in headers:
-            headers_to_sign['content-type'] = headers['Content-Type']
-        
-        # Sort and format headers
-        sorted_headers = sorted(headers_to_sign.items())
-        canonical_headers = ''.join([f"{k}:{v}\n" for k, v in sorted_headers])
-        signed_headers = ';'.join([k for k, v in sorted_headers])
-        
-        # Create payload hash
-        payload_hash = hashlib.sha256(payload.encode('utf-8')).hexdigest()
-        
-        # Create canonical request
-        canonical_request = f"{method}\n{canonical_uri}\n{canonical_querystring}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
-        
-        # Create string to sign
-        algorithm = 'AWS4-HMAC-SHA256'
-        credential_scope = f"{date_stamp}/{self.region}/{self.service}/aws4_request"
-        canonical_request_hash = hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()
-        string_to_sign = f"{algorithm}\n{amz_date}\n{credential_scope}\n{canonical_request_hash}"
-        
-        # Calculate signature
-        signing_key = self._get_signature_key(date_stamp)
-        signature = hmac.new(signing_key, string_to_sign.encode('utf-8'), hashlib.sha256).hexdigest()
-        
-        # Create authorization header
-        authorization_header = (
-            f"{algorithm} "
-            f"Credential={self.access_key}/{credential_scope}, "
-            f"SignedHeaders={signed_headers}, "
-            f"Signature={signature}"
-        )
-        
-        # Build final headers
-        signed_request_headers = dict(headers_to_sign)
-        signed_request_headers['Authorization'] = authorization_header
-        
-        # Add other original headers that weren't signed
-        for key, value in headers.items():
-            if key.lower() not in [h.lower() for h in headers_to_sign.keys()] and key != 'Authorization':
-                signed_request_headers[key] = value
-        
-        return signed_request_headers
 
 
 class HiveScheduleAPI:
@@ -347,9 +361,9 @@ class HiveScheduleAPI:
         # Sanitize authorization header for logging
         safe_headers = headers.copy()
         if "Authorization" in safe_headers:
-            auth_header = safe_headers["Authorization"]
-            if len(auth_header) > 50:
-                safe_headers["Authorization"] = f"{auth_header[:30]}...{auth_header[-20:]}"
+            token = safe_headers["Authorization"]
+            if len(token) > 20:
+                safe_headers["Authorization"] = f"{token[:10]}...{token[-10:]}"
         for key, value in safe_headers.items():
             _LOGGER.debug("  %s: %s", key, value)
         _LOGGER.debug("-" * 80)
@@ -380,101 +394,6 @@ class HiveScheduleAPI:
         
         _LOGGER.info("=" * 80)
     
-    def get_schedule(self, node_id: str) -> dict[str, Any]:
-        """Retrieve the current schedule from Hive using GET request."""
-        _LOGGER.info("Retrieving current schedule from Hive for node %s", node_id)
-        
-        url = f"{self.BASE_URL}/nodes/heating/{node_id}"
-        
-        # Try with AWS SigV4 first if we have credentials
-        if self.auth.has_aws_credentials():
-            _LOGGER.info("Using AWS Signature V4 for GET request")
-            try:
-                return self._get_with_sigv4(url, node_id)
-            except Exception as e:
-                _LOGGER.warning("AWS SigV4 failed: %s, trying bearer token", e)
-        
-        # Fallback to bearer token
-        _LOGGER.info("Using bearer token for GET request")
-        return self._get_with_bearer(url, node_id)
-    
-    def _get_with_sigv4(self, url: str, node_id: str) -> dict[str, Any]:
-        """GET request with AWS Signature V4."""
-        # Create signer
-        signer = AWSV4Signer(
-            access_key=self.auth._aws_access_key,
-            secret_key=self.auth._aws_secret_key,
-            session_token=self.auth._aws_session_token,
-            region='eu-west-1',  # Hive uses eu-west-1
-            service='execute-api'  # API Gateway service
-        )
-        
-        # Sign the request
-        headers = self.session.headers.copy()
-        signed_headers = signer.sign_request('GET', url, headers, '')
-        
-        self._log_api_call("GET", url, signed_headers)
-        
-        response = self.session.get(url, headers=signed_headers, timeout=30)
-        response.raise_for_status()
-        
-        data = response.json()
-        _LOGGER.info("✓ Successfully retrieved schedule using AWS SigV4")
-        self._format_schedule_readable(data, "CURRENT SCHEDULE FROM HIVE (via AWS SigV4)")
-        
-        return data
-    
-    def _get_with_bearer(self, url: str, node_id: str) -> dict[str, Any]:
-        """GET request with ID token - matching web app format exactly."""
-        token = self.auth.get_id_token()
-        
-        if not token:
-            raise HomeAssistantError("No auth token available")
-        
-        # Use fresh headers matching the web app exactly
-        headers = {
-            "Accept": "*/*",
-            "Content-Type": "application/json",
-            "Origin": "https://my.hivehome.com",
-            "Referer": "https://my.hivehome.com/",
-            "Authorization": token,  # ID token directly, no "Bearer " prefix
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache"
-        }
-        
-        self._log_api_call("GET", url, headers)
-        
-        _LOGGER.info("=" * 60)
-        _LOGGER.info("GET REQUEST v1.2.1 - Using fresh headers matching web app")
-        _LOGGER.info("=" * 60)
-        
-        try:
-            response = self.session.get(url, headers=headers, timeout=30)
-            
-            _LOGGER.debug("GET Response status: %s", response.status_code)
-            _LOGGER.debug("GET Response text: %s", response.text[:500] if hasattr(response, 'text') else 'no response')
-            
-            if response.status_code == 403:
-                _LOGGER.error("GET request forbidden (403)")
-                _LOGGER.error("Response: %s", response.text[:500])
-                raise HomeAssistantError(
-                    "GET request forbidden - authentication issue"
-                )
-            
-            response.raise_for_status()
-            
-            data = response.json()
-            _LOGGER.info("✓ Successfully retrieved schedule using ID token!")
-            self._format_schedule_readable(data, "CURRENT SCHEDULE FROM HIVE (Master Source)")
-            
-            return data
-            
-        except requests.exceptions.HTTPError as err:
-            _LOGGER.error("HTTP error on GET: %s", err)
-            if hasattr(err.response, 'text'):
-                _LOGGER.error("Error response: %s", err.response.text[:500])
-            raise
-    
     def update_schedule(self, node_id: str, schedule_data: dict[str, Any]) -> bool:
         """Send schedule update to Hive using beekeeper-uk API."""
         # Get fresh token
@@ -494,7 +413,6 @@ class HiveScheduleAPI:
             self._log_api_call("POST", url, self.session.headers, schedule_data)
             
             _LOGGER.info("Sending schedule update to %s", url)
-            _LOGGER.debug("Schedule data: %s", json.dumps(schedule_data, indent=2))
             
             response = self.session.post(url, json=schedule_data, timeout=30)
             response.raise_for_status()
@@ -558,29 +476,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Hive Schedule Manager from a config entry."""
     
     _LOGGER.info("=" * 80)
+    _LOGGER.info("Hive Schedule Manager v1.1.17 Production")
+    _LOGGER.info("POST-based schedule updates with YAML profiles")
     _LOGGER.info("=" * 80)
-    _LOGGER.info("  HIVE SCHEDULE MANAGER v1.2.1")
-    _LOGGER.info("  GET REQUEST FIX - FRESH HEADERS")
-    _LOGGER.info("  IF YOU SEE 'AWS CREDENTIALS REQUIRED' ERROR, FILE NOT LOADED!")
-    _LOGGER.info("=" * 80)
-    _LOGGER.info("=" * 80)
-    _LOGGER.info("Hive Schedule Manager v1.2.1 - GET Support with Fresh Headers Fix")
     
     # Initialize authentication and API
     auth = HiveAuth(hass, entry)
     api = HiveScheduleAPI(auth)
+    
+    # Load profiles
+    profiles = _load_profiles(hass)
+    _LOGGER.info("Loaded %d schedule profiles", len(profiles))
     
     # Check if we have tokens
     if not auth._id_token:
         _LOGGER.warning("No authentication tokens found in config entry")
     else:
         _LOGGER.info("Loaded authentication tokens from config entry")
-        if auth.has_aws_credentials():
-            _LOGGER.info("✓ AWS credentials extracted from tokens - GET requests should work!")
-        else:
-            _LOGGER.warning("⚠ Could not extract AWS credentials - GET requests may fail")
-            _LOGGER.info("GET requests will attempt bearer token fallback")
-        
         # Try to refresh token to ensure it's valid
         await hass.async_add_executor_job(auth.refresh_token)
     
@@ -589,6 +501,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN][entry.entry_id] = {
         "auth": auth,
         "api": api,
+        "profiles": profiles,
     }
     
     # Set up periodic token refresh
@@ -600,32 +513,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         async_track_time_interval(hass, refresh_token_periodic, DEFAULT_SCAN_INTERVAL)
     )
     
-    # Service: Get schedule
-    async def handle_get_schedule(call: ServiceCall) -> None:
-        """Handle get_schedule service call - retrieves current schedule from Hive."""
-        node_id = call.data[ATTR_NODE_ID]
-        
-        _LOGGER.info("Getting current schedule from Hive for node %s", node_id)
-        
-        try:
-            schedule_data = await hass.async_add_executor_job(
-                api.get_schedule, node_id
-            )
-            
-            if schedule_data:
-                _LOGGER.info("Successfully retrieved current schedule from Hive")
-                # Fire event with the schedule data
-                hass.bus.async_fire(
-                    f"{DOMAIN}_schedule_retrieved",
-                    {
-                        "node_id": node_id,
-                        "schedule": schedule_data.get("schedule"),
-                    }
-                )
-        except Exception as err:
-            _LOGGER.error("Failed to get schedule: %s", err)
-            raise
-    
     # Service: Set day schedule
     async def handle_set_day(call: ServiceCall) -> None:
         """Handle set_day_schedule service call - updates only the specified day."""
@@ -634,13 +521,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         profile = call.data.get(ATTR_PROFILE)
         custom_schedule = call.data.get(ATTR_SCHEDULE)
         
+        # Reload profiles to pick up any changes
+        profiles = _load_profiles(hass)
+        
         # Determine which schedule to use
         if profile and custom_schedule:
             _LOGGER.warning("Both profile and schedule provided, using custom schedule")
             day_schedule = custom_schedule
         elif profile:
+            if profile not in profiles:
+                raise HomeAssistantError(f"Unknown profile '{profile}'. Available: {', '.join(profiles.keys())}")
             _LOGGER.info("Using profile '%s' for %s", profile, day)
-            day_schedule = get_profile(profile)
+            day_schedule = profiles[profile]
         elif custom_schedule:
             _LOGGER.info("Using custom schedule for %s", day)
             day_schedule = custom_schedule
@@ -649,12 +541,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "Either 'profile' or 'schedule' must be provided"
             )
         
-        # Validate custom schedule if provided
-        if custom_schedule:
-            try:
-                validate_custom_schedule(day_schedule)
-            except ValueError as err:
-                raise HomeAssistantError(f"Invalid schedule: {err}") from err
+        # Validate schedule
+        try:
+            _validate_schedule(day_schedule)
+        except ValueError as err:
+            raise HomeAssistantError(f"Invalid schedule: {err}") from err
         
         _LOGGER.info("Setting schedule for %s on node %s", day, node_id)
         
@@ -673,23 +564,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         
         _LOGGER.info("Successfully updated %s schedule", day)
     
-    # Register services
+    # Register service with dynamic schema
     hass.services.async_register(
         DOMAIN,
         SERVICE_SET_DAY,
         handle_set_day,
-        schema=SET_DAY_SCHEMA
-    )
-    
-    hass.services.async_register(
-        DOMAIN,
-        "get_schedule",
-        handle_get_schedule,
-        schema=GET_SCHEDULE_SCHEMA
+        schema=_get_set_day_schema(hass)
     )
     
     _LOGGER.info("Hive Schedule Manager setup complete")
-    _LOGGER.info("Available services: set_day_schedule, get_schedule")
+    _LOGGER.info("Profiles file: %s", hass.config.path(PROFILES_FILE))
     return True
 
 
@@ -700,6 +584,5 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Unregister services if this is the last entry
     if not hass.data[DOMAIN]:
         hass.services.async_remove(DOMAIN, SERVICE_SET_DAY)
-        hass.services.async_remove(DOMAIN, "get_schedule")
     
     return True

@@ -1,0 +1,102 @@
+# Hive Schedule Profiles
+# This file is automatically created in your Home Assistant config directory
+# Location: /config/hive_schedule_profiles.yaml
+#
+# Edit this file to customize your heating schedules
+# After editing, the changes take effect on the next service call (no restart needed)
+#
+# Format:
+#   profile_name:
+#     - time: "HH:MM"  # 24-hour format, must be in quotes
+#       temp: 18.0      # Temperature in Celsius (5.0 - 32.0)
+#
+# Rules:
+#   - Time must be in "HH:MM" format (in quotes)
+#   - Temperature must be between 5.0 and 32.0°C
+#   - At least one entry per profile
+#   - Entries should be in chronological order
+
+# Standard weekday schedule (Mon-Fri)
+weekday:
+  - time: "06:30"
+    temp: 18.0  # Morning warmup
+  - time: "08:00"
+    temp: 16.0  # Away during day
+  - time: "16:30"
+    temp: 19.5  # Evening warmup
+  - time: "21:30"
+    temp: 16.0  # Night setback
+
+# Relaxed weekend schedule
+weekend:
+  - time: "07:30"
+    temp: 18.0  # Later morning warmup
+  - time: "09:00"
+    temp: 19.0  # Comfortable day temperature
+  - time: "22:00"
+    temp: 16.0  # Later night setback
+
+# Holiday/vacation schedule
+holiday:
+  - time: "08:00"
+    temp: 18.0  # Relaxed morning
+  - time: "22:30"
+    temp: 16.0  # Extended evening
+
+# Early start workday
+weekday_early:
+  - time: "05:30"
+    temp: 18.0
+  - time: "07:00"
+    temp: 16.0
+  - time: "16:30"
+    temp: 19.5
+  - time: "21:30"
+    temp: 16.0
+
+# Late return workday
+weekday_late:
+  - time: "06:30"
+    temp: 18.0
+  - time: "08:00"
+    temp: 16.0
+  - time: "18:30"
+    temp: 19.5
+  - time: "23:00"
+    temp: 16.0
+
+# Work from home schedule
+wfh:
+  - time: "06:30"
+    temp: 18.0
+  - time: "09:00"
+    temp: 19.0
+  - time: "17:00"
+    temp: 19.5
+  - time: "22:00"
+    temp: 16.0
+
+# Away/vacation mode (frost protection)
+away:
+  - time: "00:00"
+    temp: 12.0
+
+# All day comfort (constant temperature)
+all_day_comfort:
+  - time: "00:00"
+    temp: 19.0
+
+# ============================================================================
+# Add your custom profiles below:
+# ============================================================================
+
+# Example custom profile (uncomment and modify):
+# my_custom_schedule:
+#   - time: "07:00"
+#     temp: 18.5
+#   - time: "09:00"
+#     temp: 17.0
+#   - time: "17:00"
+#     temp: 20.0
+#   - time: "22:00"
+#     temp: 16.0

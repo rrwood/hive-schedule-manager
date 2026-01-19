@@ -1,0 +1,49 @@
+Hive Schedule Manager v1.1.17 Production - File List
+====================================================
+
+Installation Files:
+-------------------
+custom_components/hive_schedule/__init__.py      - Main integration with YAML profile loading
+custom_components/hive_schedule/const.py         - Constants and configuration
+custom_components/hive_schedule/services.yaml    - Service definitions
+custom_components/hive_schedule/manifest.json    - Integration metadata
+
+Configuration Files:
+--------------------
+hive_schedule_profiles.yaml                      - Example profiles (copy to /config/)
+
+Documentation:
+--------------
+README.md                                        - Complete documentation
+INSTALL.md                                       - Quick installation guide
+CHANGELOG.md                                     - Version history and changes
+FILES.txt                                        - This file
+
+Key Features in __init__.py:
+----------------------------
+✅ YAML profile loading from /config/hive_schedule_profiles.yaml
+✅ Automatic profile file creation on first run
+✅ Profile reloading on each service call (no restart needed)
+✅ Built-in fallback profiles
+✅ POST-based schedule updates (stable and working)
+✅ Readable schedule output in logs
+✅ Full debug logging support
+
+Installation:
+-------------
+1. Copy custom_components/hive_schedule/ to /config/custom_components/hive_schedule/
+2. Restart Home Assistant
+3. Add integration via Settings → Devices & Services
+4. The profiles file will be created automatically in /config/
+
+Usage:
+------
+service: hive_schedule.set_day_schedule
+data:
+  node_id: "YOUR-NODE-ID"  # From Hive website URL
+  day: "monday"
+  profile: "weekday"       # Or use custom schedule
+
+Node ID: Find it at the end of the URL when viewing your heating on my.hivehome.com
+Example URL: https://my.hivehome.com/products/heating/d2708e98-f22f-483e-b590-9ddbd642a3b7
+Node ID: d2708e98-f22f-483e-b590-9ddbd642a3b7
