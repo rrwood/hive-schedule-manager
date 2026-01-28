@@ -1,0 +1,61 @@
+set_day_schedule:
+  name: Set Day Schedule
+  description: Update the heating schedule for a single day using a profile or custom schedule
+  fields:
+    node_id:
+      name: Node ID
+      description: The Hive heating node ID
+      required: true
+      example: "d2708e98-f22f-483e-b590-9ddbd642a3b7"
+      selector:
+        text:
+    day:
+      name: Day
+      description: Day of the week to update
+      required: true
+      selector:
+        select:
+          options:
+            - "monday"
+            - "tuesday"
+            - "wednesday"
+            - "thursday"
+            - "friday"
+            - "saturday"
+            - "sunday"
+    profile:
+      name: Profile
+      description: Pre-defined schedule profile to use
+      required: false
+      selector:
+        select:
+          options:
+            - "weekday"
+            - "weekend"
+            - "holiday"
+            - "weekday_early"
+            - "weekday_late"
+            - "wfh"
+            - "away"
+            - "all_day_comfort"
+    schedule:
+      name: Custom Schedule
+      description: Custom schedule entries for the day (alternative to profile)
+      required: false
+      example: '[{"time": "06:30", "temp": 18.0}, {"time": "22:00", "temp": 16.0}]'
+
+get_schedule:
+  name: Get Current Schedule
+  description: Retrieve the CURRENT heating schedule from Hive (reads master schedule from Hive, not local state)
+  fields:
+    node_id:
+      name: Node ID
+      description: The Hive heating node ID
+      required: true
+      example: "d2708e98-f22f-483e-b590-9ddbd642a3b7"
+      selector:
+        text:
+
+refresh_token:
+  name: Refresh Token
+  description: Manually refresh the Hive authentication token

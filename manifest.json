@@ -1,0 +1,15 @@
+{
+  "domain": "hive_schedule",
+  "name": "Hive Schedule Manager",
+  "codeowners": ["@yourusername"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/yourusername/hive-schedule-manager",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/yourusername/hive-schedule-manager/issues",
+  "requirements": [
+    "pycognito==2024.5.1",
+    "aiofiles==24.1.0"
+  ],
+  "version": "1.1.17"
+}

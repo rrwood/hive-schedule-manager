@@ -1,0 +1,23 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Hive Schedule Manager",
+        "description": "This integration adds schedule management to your Hive heating. Make sure you have the official Hive integration configured first."
+      }
+    },
+    "error": {
+      "hive_not_configured": "Please install and configure the official Hive integration first"
+    },
+    "abort": {
+      "already_configured": "Hive Schedule Manager is already configured",
+      "hive_not_configured": "Official Hive integration not found. Please install and configure it first."
+    }
+  },
+  "services": {
+    "set_day_schedule": {
+      "name": "Set day schedule",
+      "description": "Update the heating schedule for a single day using a profile or custom schedule."
+    }
+  }
+}
