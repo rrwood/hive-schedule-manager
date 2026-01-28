@@ -127,8 +127,9 @@ Write-Host "[8/8] Creating GitHub release..." -ForegroundColor Yellow
 # Simple release message
 $releaseMsg = "$CommitMessage - See commit history for details"
 
-gh release create $newVersion --title "Release $newVersion" --notes $releaseMsg --target $branch
+$releaseOutput = gh release create $newVersion --title "Release $newVersion" --notes $releaseMsg --target $branch 2>&1
 if ($LASTEXITCODE -ne 0) { 
+    Write-Host "Error output: $releaseOutput" -ForegroundColor Red
     Write-Host "Warning: Failed to create GitHub release. The code is pushed but release creation failed." -ForegroundColor Yellow
     Write-Host "You can create the release manually on GitHub." -ForegroundColor Yellow
     Write-Host "Check if gh CLI is authenticated: gh auth status" -ForegroundColor Yellow
