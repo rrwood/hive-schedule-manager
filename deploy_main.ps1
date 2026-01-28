@@ -94,8 +94,18 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "OK - Tag $newVersion created" -ForegroundColor Green
 
-# 6. Push to GitHub
-Write-Host "[6/7] Pushing to GitHub..." -ForegroundColor Yellow
+# 6. Save new version to file
+Write-Host "[6/8] Updating version file..." -ForegroundColor Yellow
+$newVersion | Out-File $versionFile -NoNewline
+git add $versionFile
+git commit -m "Update version to $newVersion"
+if ($LASTEXITCODE -ne 0) { 
+    Write-Host "Warning: Failed to commit version file update" -ForegroundColor Yellow
+}
+Write-Host "OK - Version file updated" -ForegroundColor Green
+
+# 7. Push to GitHub
+Write-Host "[7/8] Pushing to GitHub..." -ForegroundColor Yellow
 Write-Host "  - Pushing branch: $branch" -ForegroundColor Gray
 git push -u origin $branch
 if ($LASTEXITCODE -ne 0) { 
@@ -111,8 +121,8 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "OK - Pushed to GitHub" -ForegroundColor Green
 
-# 7. Create GitHub Release
-Write-Host "[7/7] Creating GitHub release..." -ForegroundColor Yellow
+# 8. Create GitHub Release (after tag is pushed)
+Write-Host "[8/8] Creating GitHub release..." -ForegroundColor Yellow
 
 # Simple release message
 $releaseMsg = "$CommitMessage - See commit history for details"
@@ -121,15 +131,10 @@ gh release create $newVersion --title "Release $newVersion" --notes $releaseMsg 
 if ($LASTEXITCODE -ne 0) { 
     Write-Host "Warning: Failed to create GitHub release. The code is pushed but release creation failed." -ForegroundColor Yellow
     Write-Host "You can create the release manually on GitHub." -ForegroundColor Yellow
+    Write-Host "Check if gh CLI is authenticated: gh auth status" -ForegroundColor Yellow
 } else {
     Write-Host "OK - GitHub release created" -ForegroundColor Green
 }
-
-# 8. Save new version to file
-$newVersion | Out-File $versionFile -NoNewline
-git add $versionFile
-git commit -m "Update version to $newVersion"
-git push origin $branch
 
 Write-Host ""
 Write-Host "================================" -ForegroundColor Green
